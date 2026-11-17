@@ -1,6 +1,7 @@
 #nullable disable
 #pragma warning disable CS1591
 
+using System;
 using System.Collections.Generic;
 using System.ComponentModel;
 using System.Text.Json.Serialization;
@@ -30,6 +31,30 @@ namespace MediaBrowser.Model.Dto
         public MediaProtocol Protocol { get; set; }
 
         public string Id { get; set; }
+
+        /// <summary>Gets or sets the selected MPLS/DVD title number, if this is a disc source.</summary>
+        public int? DiscTitle { get; set; }
+
+        /// <summary>Gets or sets the real library item owning this disc source.</summary>
+        public Guid? DiscItemId { get; set; }
+
+        /// <summary>Gets or sets the version whose additional parts form the playback queue.</summary>
+        public Guid? DiscVersionId { get; set; }
+
+        /// <summary>Gets or sets the one-based disc number within the selected version.</summary>
+        public int? DiscPartIndex { get; set; }
+
+        /// <summary>Gets or sets the number of discs in the selected version.</summary>
+        public int? DiscPartCount { get; set; }
+
+        /// <summary>Gets or sets the position saved for this user and title.</summary>
+        public long? DiscResumePositionTicks { get; set; }
+
+        /// <summary>Gets or sets whether the user previously selected this title.</summary>
+        public bool DiscTitleSelected { get; set; }
+
+        /// <summary>Gets or sets chapters specific to the selected title.</summary>
+        public ChapterInfo[] DiscChapters { get; set; }
 
         public string Path { get; set; }
 
@@ -91,6 +116,16 @@ namespace MediaBrowser.Model.Dto
         public VideoType? VideoType { get; set; }
 
         public IsoType? IsoType { get; set; }
+
+        /// <summary>Gets the navigation type regardless of directory or image storage.</summary>
+        [JsonIgnore]
+        public IsoType? DiscType => VideoType switch
+        {
+            MediaBrowser.Model.Entities.VideoType.BluRay => MediaBrowser.Model.Entities.IsoType.BluRay,
+            MediaBrowser.Model.Entities.VideoType.Dvd => MediaBrowser.Model.Entities.IsoType.Dvd,
+            MediaBrowser.Model.Entities.VideoType.Iso => IsoType,
+            _ => null
+        };
 
         public Video3DFormat? Video3DFormat { get; set; }
 

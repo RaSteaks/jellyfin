@@ -78,14 +78,26 @@ namespace MediaBrowser.Providers.MediaInfo
         {
             MediaSourceInfo mediaSource = new MediaSourceInfo
             {
+                Path = item.Path,
                 VideoType = item.VideoType,
                 IsoType = item.IsoType,
                 Protocol = item.PathProtocol ?? MediaProtocol.File,
             };
 
+            if (mediaSource.DiscType.HasValue)
+            {
+                // Shared library artwork has no user's title selection to use.
+                var titles = await _mediaEncoder.GetDiscTitles(mediaSource, cancellationToken).ConfigureAwait(false);
+                if (titles.Count != 1)
+                {
+                    return new DynamicImageResponse { HasImage = false };
+                }
+
+                mediaSource.DiscTitle = titles[0].Number;
+            }
+
             // If we know the duration, grab it from 10% into the video. Otherwise just 10 seconds in.
-            // Always use 10 seconds for dvd because our duration could be out of whack
-            var imageOffset = item.VideoType != VideoType.Dvd && item.RunTimeTicks > 0
+            var imageOffset = item.RunTimeTicks > 0
                                   ? TimeSpan.FromTicks(item.RunTimeTicks.Value / 10)
                                   : TimeSpan.FromSeconds(10);
 

@@ -1,4 +1,6 @@
 using System.Collections.Generic;
+using System.IO;
+using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using Emby.Naming.Common;
@@ -9,6 +11,7 @@ using MediaBrowser.Controller.Entities.Movies;
 using MediaBrowser.Controller.Library;
 using MediaBrowser.Controller.LiveTv;
 using MediaBrowser.Controller.MediaEncoding;
+using MediaBrowser.Controller.Providers;
 using MediaBrowser.Model.Entities;
 using MediaBrowser.Model.Globalization;
 using MediaBrowser.Model.IO;
@@ -57,6 +60,40 @@ public class SubtitleResolverTests
             .Returns(true);
 
         _subtitleResolver = new SubtitleResolver(Mock.Of<ILogger<SubtitleResolver>>(), localizationManager, mediaEncoder.Object, fileSystem.Object, new NamingOptions());
+    }
+
+    [Theory]
+    [InlineData(VideoType.BluRay, false)]
+    [InlineData(VideoType.BluRay, true)]
+    [InlineData(VideoType.Dvd, false)]
+    [InlineData(VideoType.Dvd, true)]
+    public async Task GetExternalStreams_DiscSidecars_StayWithSelectedDisc(VideoType type, bool stacked)
+    {
+        BaseItem.MediaSourceManager = Mock.Of<IMediaSourceManager>();
+        var discPath = Path.Combine(MediaInfoResolverTests.VideoDirectoryPath, "Film.2026 disc1");
+        var subtitlePath = Path.Combine(discPath, "movie.default.forced.srt");
+        var namedSubtitlePath = Path.Combine(discPath, "Film.2026 disc1.srt");
+        var video = new Movie
+        {
+            Path = discPath,
+            VideoType = type,
+            AdditionalParts = stacked ? [Path.Combine(MediaInfoResolverTests.VideoDirectoryPath, "Film.2026 disc2")] : []
+        };
+        var directory = new Mock<IDirectoryService>(MockBehavior.Strict);
+        directory.Setup(d => d.GetFilePaths(discPath, false))
+            .Returns([subtitlePath, namedSubtitlePath, Path.Combine(discPath, "movie2.srt"), Path.Combine(discPath, "Other Film.srt")]);
+        directory.Setup(d => d.GetFilePaths(video.GetInternalMetadataPath(), false)).Returns([]);
+
+        var streams = await _subtitleResolver.GetExternalStreamsAsync(video, 4, directory.Object, false, CancellationToken.None);
+
+        Assert.Equal(2, streams.Count);
+        var generic = Assert.Single(streams, stream => stream.Path == subtitlePath);
+        Assert.True(generic.IsExternal);
+        Assert.True(generic.IsDefault);
+        Assert.True(generic.IsForced);
+        Assert.Equal(new[] { 4, 5 }, streams.Select(stream => stream.Index));
+        Assert.Contains(streams, stream => stream.Path == namedSubtitlePath);
+        directory.Verify(d => d.GetFilePaths(MediaInfoResolverTests.VideoDirectoryPath, It.IsAny<bool>()), Times.Never);
     }
 
     [Theory]

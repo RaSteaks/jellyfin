@@ -1264,23 +1264,9 @@ namespace MediaBrowser.Controller.MediaEncoding
                 arg.Append(canvasArgs);
             }
 
-            if (state.MediaSource.VideoType == VideoType.Dvd || state.MediaSource.VideoType == VideoType.BluRay)
-            {
-                var concatFilePath = Path.Join(_configurationManager.CommonApplicationPaths.CachePath, "concat", state.MediaSource.Id + ".concat");
-                if (!File.Exists(concatFilePath))
-                {
-                    _mediaEncoder.GenerateConcatConfig(state.MediaSource, concatFilePath);
-                }
-
-                arg.Append(" -f concat -safe 0 -i \"")
-                    .Append(concatFilePath)
-                    .Append("\" ");
-            }
-            else
-            {
-                arg.Append(" -i ")
-                    .Append(_mediaEncoder.GetInputPathArgument(state));
-            }
+            arg.Append(' ').Append(_mediaEncoder.GetInputOptions(state.MediaSource))
+                .Append(" -i ")
+                .Append(_mediaEncoder.GetInputPathArgument(state));
 
             if (NeedsExternalSubtitleMuxing(state))
             {
@@ -8005,6 +7991,11 @@ namespace MediaBrowser.Controller.MediaEncoding
 
         public static int FindIndex(IReadOnlyList<MediaStream> mediaStreams, MediaStream streamToFind)
         {
+            if (streamToFind.InputStreamIndex.HasValue)
+            {
+                return streamToFind.InputStreamIndex.Value;
+            }
+
             var index = 0;
             var length = mediaStreams.Count;
 
@@ -8027,20 +8018,7 @@ namespace MediaBrowser.Controller.MediaEncoding
 
         public static int GetSubtitleStreamIndexForFfmpeg(MediaSourceInfo mediaSource, MediaStream subtitleStream)
         {
-            var index = FindIndex(mediaSource.MediaStreams, subtitleStream);
-            if (index == -1 || subtitleStream.IsExternal || mediaSource.VideoType != VideoType.BluRay)
-            {
-                return index;
-            }
-
-            var hiddenStreamsBefore = mediaSource.MediaStreams.Count(s =>
-                s.Type == MediaStreamType.Audio
-                && !s.IsExternal
-                && (string.Equals(s.Codec, "truehd", StringComparison.OrdinalIgnoreCase)
-                    || string.Equals(s.Codec, "atmos", StringComparison.OrdinalIgnoreCase))
-                && s.Index < subtitleStream.Index);
-
-            return index + hiddenStreamsBefore;
+            return FindIndex(mediaSource.MediaStreams, subtitleStream);
         }
 
         public static bool IsCopyCodec(string codec)

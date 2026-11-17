@@ -276,6 +276,19 @@ namespace MediaBrowser.Controller.MediaEncoding
         string GetInputPathArgument(string path, MediaSourceInfo mediaSource);
 
         /// <summary>
+        /// Gets source-specific options to place before the input argument.
+        /// </summary>
+        /// <param name="mediaSource">The selected media source.</param>
+        /// <returns>Input options, or an empty string for ordinary files.</returns>
+        string GetInputOptions(MediaSourceInfo mediaSource);
+
+        /// <summary>Enumerates navigable titles without extracting media.</summary>
+        /// <param name="source">The disc directory or image.</param>
+        /// <param name="cancellationToken">The cancellation token.</param>
+        /// <returns>Titles available for explicit selection.</returns>
+        Task<IReadOnlyList<DiscTitleInfo>> GetDiscTitles(MediaSourceInfo source, CancellationToken cancellationToken);
+
+        /// <summary>
         /// Generates a FFmpeg concat config for the source.
         /// </summary>
         /// <param name="source">The <see cref="MediaSourceInfo"/>.</param>

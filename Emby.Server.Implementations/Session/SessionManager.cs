@@ -58,6 +58,7 @@ namespace Emby.Server.Implementations.Session
         private readonly IDtoService _dtoService;
         private readonly IImageProcessor _imageProcessor;
         private readonly IMediaSourceManager _mediaSourceManager;
+        private readonly IDiscMediaSourceManager _discSources;
         private readonly IServerApplicationHost _appHost;
         private readonly IDeviceManager _deviceManager;
         private readonly CancellationTokenRegistration _shutdownCallback;
@@ -88,6 +89,7 @@ namespace Emby.Server.Implementations.Session
         /// <param name="appHost">Instance of <see cref="IServerApplicationHost"/> interface.</param>
         /// <param name="deviceManager">Instance of <see cref="IDeviceManager"/> interface.</param>
         /// <param name="mediaSourceManager">Instance of <see cref="IMediaSourceManager"/> interface.</param>
+        /// <param name="discSources">Disc title playback states.</param>
         /// <param name="hostApplicationLifetime">Instance of <see cref="IHostApplicationLifetime"/> interface.</param>
         public SessionManager(
             ILogger<SessionManager> logger,
@@ -102,7 +104,8 @@ namespace Emby.Server.Implementations.Session
             IServerApplicationHost appHost,
             IDeviceManager deviceManager,
             IMediaSourceManager mediaSourceManager,
-            IHostApplicationLifetime hostApplicationLifetime)
+            IHostApplicationLifetime hostApplicationLifetime,
+            IDiscMediaSourceManager discSources = null)
         {
             _logger = logger;
             _eventManager = eventManager;
@@ -116,6 +119,7 @@ namespace Emby.Server.Implementations.Session
             _appHost = appHost;
             _deviceManager = deviceManager;
             _mediaSourceManager = mediaSourceManager;
+            _discSources = discSources;
             _shutdownCallback = hostApplicationLifetime.ApplicationStopping.Register(OnApplicationStopping);
 
             _deviceManager.DeviceOptionsUpdated += OnDeviceManagerDeviceOptionsUpdated;
@@ -731,6 +735,26 @@ namespace Emby.Server.Implementations.Session
             return item;
         }
 
+        private async Task<bool?> SaveDiscProgress(BaseItem item, string sourceId, IEnumerable<User> users, long position, bool failed = false)
+        {
+            if (sourceId?.StartsWith("disc-", StringComparison.Ordinal) != true)
+            {
+                return null;
+            }
+
+            var completed = false;
+            if (!failed)
+            {
+                var source = await _mediaSourceManager.GetMediaSource(item, sourceId, null, false, CancellationToken.None).ConfigureAwait(false);
+                foreach (var user in users)
+                {
+                    completed = _discSources.SaveProgress(user, source, position);
+                }
+            }
+
+            return completed;
+        }
+
         /// <summary>
         /// Resolves the item whose user data (playback position, played status) should be updated
         /// for a playback report. When an alternate version is played the client reports the displayed
@@ -792,6 +816,8 @@ namespace Emby.Server.Implementations.Session
                 {
                     OnPlaybackStart(user, progressItem);
                 }
+
+                await SaveDiscProgress(libraryItem, info.MediaSourceId, users, info.PositionTicks ?? 0).ConfigureAwait(false);
             }
 
             if (!string.IsNullOrEmpty(info.LiveStreamId))
@@ -926,7 +952,8 @@ namespace Emby.Server.Implementations.Session
             var users = GetUsers(session);
 
             // only update saved user data on actual check-ins, not automated ones
-            if (libraryItem is not null && !isAutomated)
+            if (libraryItem is not null && !isAutomated
+                && await SaveDiscProgress(libraryItem, info.MediaSourceId, users, info.PositionTicks ?? 0).ConfigureAwait(false) is null)
             {
                 var progressItem = GetProgressItem(libraryItem, info.MediaSourceId);
                 foreach (var user in users)
@@ -1137,9 +1164,10 @@ namespace Emby.Server.Implementations.Session
             RemoveNowPlayingItem(session);
 
             var users = GetUsers(session);
-            var playedToCompletion = false;
+            var discCompleted = libraryItem is null ? null : await SaveDiscProgress(libraryItem, info.MediaSourceId, users, info.PositionTicks ?? 0, info.Failed).ConfigureAwait(false);
+            var playedToCompletion = discCompleted ?? false;
 
-            if (libraryItem is not null)
+            if (libraryItem is not null && discCompleted is null)
             {
                 var progressItem = GetProgressItem(libraryItem, info.MediaSourceId);
                 foreach (var user in users)

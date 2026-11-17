@@ -60,6 +60,7 @@ namespace Jellyfin.XbmcMetadata.Tests.Location
 
             var paths = MovieNfoSaver.GetMovieSavePaths(new ItemInfo(movie)).ToArray();
             Assert.Equal(3, paths.Length);
+            Assert.Equal(path3, paths[0]);
             Assert.Contains(path1, paths);
             Assert.Contains(path2, paths);
             Assert.Contains(path3, paths);

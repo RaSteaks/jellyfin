@@ -126,15 +126,30 @@ public static class StreamingHelpers
 
             if (mediaSource is null)
             {
-                var mediaSources = await mediaSourceManager.GetPlaybackMediaSources(libraryManager.GetItemById<BaseItem>(streamingRequest.Id), null, false, false, cancellationToken).ConfigureAwait(false);
+                var mediaSources = await mediaSourceManager.GetPlaybackMediaSources(item, state.User, false, false, cancellationToken).ConfigureAwait(false);
 
                 mediaSource = string.IsNullOrEmpty(streamingRequest.MediaSourceId)
-                    ? mediaSources[0]
+                    ? SelectDefaultSource(mediaSources)
                     : mediaSources.FirstOrDefault(i => string.Equals(i.Id, streamingRequest.MediaSourceId, StringComparison.Ordinal));
 
-                if (mediaSource is null && Guid.Parse(streamingRequest.MediaSourceId).Equals(streamingRequest.Id))
+                if (mediaSource is null && Guid.TryParse(streamingRequest.MediaSourceId, out var legacySourceId) && legacySourceId.Equals(streamingRequest.Id))
                 {
-                    mediaSource = mediaSources[0];
+                    mediaSource = SelectDefaultSource(mediaSources);
+                }
+
+                if (mediaSource is null && streamingRequest.MediaSourceId?.StartsWith("disc-", StringComparison.Ordinal) == true)
+                {
+                    mediaSource = await mediaSourceManager.GetMediaSource(item, streamingRequest.MediaSourceId, null, false, cancellationToken).ConfigureAwait(false);
+                }
+
+                if (mediaSource is null)
+                {
+                    throw new ResourceNotFoundException("Select an available media source before playback.");
+                }
+
+                if (mediaSource?.DiscTitle is not null)
+                {
+                    mediaSource = await mediaSourceManager.GetMediaSource(item, mediaSource.Id, null, false, cancellationToken).ConfigureAwait(false);
                 }
             }
         }
@@ -619,4 +634,12 @@ public static class StreamingHelpers
 
         return container;
     }
+    private static MediaSourceInfo? SelectDefaultSource(IReadOnlyList<MediaSourceInfo> sources)
+    {
+        var first = sources.FirstOrDefault();
+        return first?.DiscTitle is not null
+            ? sources.FirstOrDefault(s => s.DiscItemId == first.DiscItemId && s.DiscTitleSelected)
+            : first;
+    }
+
 }

@@ -15,7 +15,7 @@ namespace Jellyfin.Server.Implementations.Migrations
         protected override void BuildModel(ModelBuilder modelBuilder)
         {
 #pragma warning disable 612, 618
-            modelBuilder.HasAnnotation("ProductVersion", "10.0.11");
+            modelBuilder.HasAnnotation("ProductVersion", "10.0.14");
 
             modelBuilder.Entity("Jellyfin.Database.Implementations.Entities.AccessSchedule", b =>
                 {
@@ -588,6 +588,35 @@ namespace Jellyfin.Server.Implementations.Migrations
                         .IsUnique();
 
                     b.ToTable("CustomItemDisplayPreferences");
+
+                    b.HasAnnotation("Sqlite:UseSqlReturningClause", false);
+                });
+
+            modelBuilder.Entity("Jellyfin.Database.Implementations.Entities.DiscPlaybackState", b =>
+                {
+                    b.Property<Guid>("UserId")
+                        .HasColumnType("TEXT");
+
+                    b.Property<Guid>("ItemId")
+                        .HasColumnType("TEXT");
+
+                    b.Property<int>("Title")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<DateTime>("LastPlayedUtc")
+                        .HasColumnType("TEXT");
+
+                    b.Property<bool>("Played")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<long>("PositionTicks")
+                        .HasColumnType("INTEGER");
+
+                    b.HasKey("UserId", "ItemId", "Title");
+
+                    b.HasIndex("ItemId");
+
+                    b.ToTable("DiscPlaybackStates");
 
                     b.HasAnnotation("Sqlite:UseSqlReturningClause", false);
                 });
@@ -1574,6 +1603,21 @@ namespace Jellyfin.Server.Implementations.Migrations
                         .IsRequired();
 
                     b.Navigation("Item");
+                });
+
+            modelBuilder.Entity("Jellyfin.Database.Implementations.Entities.DiscPlaybackState", b =>
+                {
+                    b.HasOne("Jellyfin.Database.Implementations.Entities.BaseItemEntity", null)
+                        .WithMany()
+                        .HasForeignKey("ItemId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.HasOne("Jellyfin.Database.Implementations.Entities.User", null)
+                        .WithMany()
+                        .HasForeignKey("UserId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
                 });
 
             modelBuilder.Entity("Jellyfin.Database.Implementations.Entities.DisplayPreferences", b =>

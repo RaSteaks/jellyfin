@@ -63,6 +63,7 @@ namespace Emby.Server.Implementations.Library
         private readonly JsonSerializerOptions _jsonOptions = JsonDefaults.Options;
 
         private IMediaSourceProvider[] _providers;
+        private readonly IDiscMediaSourceManager _discSources;
 
         public MediaSourceManager(
             IServerApplicationHost appHost,
@@ -77,7 +78,8 @@ namespace Emby.Server.Implementations.Library
             IMediaEncoder mediaEncoder,
             IDirectoryService directoryService,
             IMediaStreamRepository mediaStreamRepository,
-            IMediaAttachmentRepository mediaAttachmentRepository)
+            IMediaAttachmentRepository mediaAttachmentRepository,
+            IDiscMediaSourceManager discSources = null)
         {
             _appHost = appHost;
             _itemRepo = itemRepo;
@@ -92,6 +94,7 @@ namespace Emby.Server.Implementations.Library
             _directoryService = directoryService;
             _mediaStreamRepository = mediaStreamRepository;
             _mediaAttachmentRepository = mediaAttachmentRepository;
+            _discSources = discSources;
         }
 
         public void AddParts(IEnumerable<IMediaSourceProvider> providers)
@@ -180,7 +183,7 @@ namespace Emby.Server.Implementations.Library
             ResolveSymlinkPaths(mediaSources, enablePathSubstitution);
 
             // If file is strm or main media stream is missing, force a metadata refresh with remote probing
-            if (allowMediaProbe && mediaSources[0].Type != MediaSourceType.Placeholder
+            if (allowMediaProbe && !mediaSources[0].DiscType.HasValue && mediaSources[0].Type != MediaSourceType.Placeholder
                 && (item.Path.EndsWith(".strm", StringComparison.OrdinalIgnoreCase)
                     || (item.MediaType == MediaType.Video && mediaSources[0].MediaStreams.All(i => i.Type != MediaStreamType.Video))
                     || (item.MediaType == MediaType.Audio && mediaSources[0].MediaStreams.All(i => i.Type != MediaStreamType.Audio))))
@@ -233,7 +236,10 @@ namespace Emby.Server.Implementations.Library
                 ? topSourceId
                 : item.Id;
 
-            return SortMediaSources(list, preferredId).ToArray();
+            var sorted = SortMediaSources(list, preferredId).ToArray();
+            return sorted.Any(s => s.DiscType.HasValue)
+                ? await _discSources.Expand(sorted, user, cancellationToken).ConfigureAwait(false)
+                : sorted;
         }
 
         /// <inheritdoc />>
@@ -377,7 +383,17 @@ namespace Emby.Server.Implementations.Library
 
             var sources = await GetPlaybackMediaSources(item, null, false, enablePathSubstitution, cancellationToken).ConfigureAwait(false);
 
-            return sources.FirstOrDefault(i => string.Equals(i.Id, mediaSourceId, StringComparison.OrdinalIgnoreCase));
+            var source = sources.FirstOrDefault(i => string.Equals(i.Id, mediaSourceId, StringComparison.OrdinalIgnoreCase));
+            if (source?.DiscTitle is not null)
+            {
+                source = await _discSources.Probe(source, cancellationToken).ConfigureAwait(false);
+                foreach (var stream in source.MediaStreams)
+                {
+                    stream.SupportsExternalStream = StreamSupportsExternalStream(stream);
+                }
+            }
+
+            return source;
         }
 
         public IReadOnlyList<MediaSourceInfo> GetStaticMediaSources(BaseItem item, bool enablePathSubstitution, User user = null)
@@ -596,7 +612,7 @@ namespace Emby.Server.Implementations.Library
             {
                 var userData = item is null ? null : _userDataManager.GetUserData(user, item);
 
-                var allowRememberingSelection = item is null || item.EnableRememberingTrackSelections;
+                var allowRememberingSelection = !source.DiscTitle.HasValue && (item is null || item.EnableRememberingTrackSelections);
 
                 var originalLanguage = item?.GetInheritedOriginalLanguage();
 

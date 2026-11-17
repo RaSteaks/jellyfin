@@ -8,6 +8,12 @@ namespace Jellyfin.Api.Models.MediaInfoDtos;
 /// </summary>
 public class PlaybackInfoDto
 {
+    /// <summary>Gets or sets whether the client can display disc title selection.</summary>
+    public bool SupportsDiscTitleSelection { get; set; }
+
+    /// <summary>Gets or sets whether to choose a different disc title instead of the remembered one.</summary>
+    public bool ForceDiscTitleSelection { get; set; }
+
     /// <summary>
     /// Gets or sets the playback userId.
     /// </summary>

@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.Globalization;
 using System.Linq;
 using Emby.Naming.AudioBook;
 using Emby.Naming.Common;
@@ -128,7 +129,7 @@ namespace Emby.Naming.Video
                     continue;
                 }
 
-                yield return new FileStack(fileName, stack.IsDirectory, stack.Parts.Select(kv => kv.Value.FullName).ToArray());
+                yield return new FileStack(fileName, stack.IsDirectory, stack.Parts.OrderBy(kv => kv.Key, StringComparer.Create(CultureInfo.InvariantCulture, CompareOptions.NumericOrdering | CompareOptions.IgnoreCase)).Select(kv => kv.Value.FullName).ToArray());
             }
         }
 

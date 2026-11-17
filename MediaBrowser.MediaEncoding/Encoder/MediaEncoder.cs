@@ -419,10 +419,16 @@ namespace MediaBrowser.MediaEncoding.Encoder
         {
             var extractChapters = request.ExtractChapters;
             var extraArgs = GetExtraArguments(request);
+            extraArgs += " " + GetInputOptions(request.MediaSource);
+            if (request.ExtractChapters && request.MediaSource.DiscType == IsoType.Dvd)
+            {
+                extraArgs += " -preindex 1";
+            }
 
+            var inputPath = request.MediaSource.DiscType.HasValue ? request.MediaSource.EncoderPath ?? request.MediaSource.Path : request.MediaSource.Path;
             return GetMediaInfoInternal(
-                GetInputArgument(request.MediaSource.Path, request.MediaSource),
-                request.MediaSource.Path,
+                GetInputArgument(inputPath, request.MediaSource),
+                inputPath,
                 request.MediaSource.Protocol,
                 extractChapters,
                 extraArgs,
@@ -479,8 +485,19 @@ namespace MediaBrowser.MediaEncoding.Encoder
         /// <inheritdoc />
         public string GetInputArgument(string inputFile, MediaSourceInfo mediaSource)
         {
+            if (mediaSource.VideoType == VideoType.Iso && !mediaSource.IsoType.HasValue)
+            {
+                throw new NotSupportedException("The image does not contain a recognized Blu-ray or DVD structure.");
+            }
+
+            if (mediaSource.DiscType == IsoType.Dvd)
+            {
+                // dvdvideo opens its input itself; libdvdread expects a filesystem path.
+                return "\"" + inputFile.EscapeProcessArgument() + "\"";
+            }
+
             var prefix = "file";
-            if (mediaSource.IsoType == IsoType.BluRay)
+            if (mediaSource.DiscType == IsoType.BluRay)
             {
                 prefix = "bluray";
             }
@@ -628,12 +645,13 @@ namespace MediaBrowser.MediaEncoding.Encoder
             CancellationToken cancellationToken)
         {
             var inputArgument = GetInputPathArgument(inputFile, mediaSource);
+            var inputOptions = GetInputOptions(mediaSource);
 
             if (!isAudio)
             {
                 try
                 {
-                    return await ExtractImageInternal(inputArgument, container, videoStream, imageStreamIndex, threedFormat, offset, true, targetFormat, false, cancellationToken).ConfigureAwait(false);
+                    return await ExtractImageInternal(inputArgument, inputOptions, container, videoStream, imageStreamIndex, threedFormat, offset, true, targetFormat, false, cancellationToken).ConfigureAwait(false);
                 }
                 catch (ArgumentException)
                 {
@@ -645,7 +663,7 @@ namespace MediaBrowser.MediaEncoding.Encoder
                 }
             }
 
-            return await ExtractImageInternal(inputArgument, container, videoStream, imageStreamIndex, threedFormat, offset, false, targetFormat, isAudio, cancellationToken).ConfigureAwait(false);
+            return await ExtractImageInternal(inputArgument, inputOptions, container, videoStream, imageStreamIndex, threedFormat, offset, false, targetFormat, isAudio, cancellationToken).ConfigureAwait(false);
         }
 
         private string GetImageResolutionParameter()
@@ -673,6 +691,7 @@ namespace MediaBrowser.MediaEncoding.Encoder
 
         private async Task<string> ExtractImageInternal(
             string inputPath,
+            string inputOptions,
             string container,
             MediaStream videoStream,
             int? imageStreamIndex,
@@ -749,14 +768,15 @@ namespace MediaBrowser.MediaEncoding.Encoder
             var mapArg = imageStreamIndex.HasValue ? (" -map 0:" + imageStreamIndex.Value.ToString(CultureInfo.InvariantCulture)) : string.Empty;
             var args = string.Format(
                 CultureInfo.InvariantCulture,
-                "-i {0}{1} -threads {2} -v quiet -vframes 1 -vf {3}{4}{5} -f image2 \"{6}\"",
+                "{7} -i {0}{1} -threads {2} -v quiet -vframes 1 -vf {3}{4}{5} -f image2 \"{6}\"",
                 inputPath,
                 mapArg,
                 _threads,
                 vf,
                 isAudio ? string.Empty : GetImageResolutionParameter(),
                 EncodingHelper.GetVideoSyncOption("-1", EncoderVersion), // auto decide fps mode
-                tempExtractPath);
+                tempExtractPath,
+                inputOptions);
 
             if (offset.HasValue)
             {
@@ -1270,6 +1290,11 @@ namespace MediaBrowser.MediaEncoding.Encoder
                 .OrderBy(i => i.FullName)
                 .ToList();
 
+            if (allVobs.Count == 0)
+            {
+                return Array.Empty<string>();
+            }
+
             if (titleNumber.HasValue)
             {
                 var prefix = string.Format(CultureInfo.InvariantCulture, "VTS_{0:D2}_", titleNumber.Value);
@@ -1315,12 +1340,76 @@ namespace MediaBrowser.MediaEncoding.Encoder
         /// <inheritdoc />
         public string GetInputPathArgument(string path, MediaSourceInfo mediaSource)
         {
-            return mediaSource.VideoType switch
+            return GetInputArgument(mediaSource.DiscType.HasValue ? mediaSource.EncoderPath ?? path : path, mediaSource);
+        }
+
+        /// <inheritdoc />
+        public string GetInputOptions(MediaSourceInfo mediaSource)
+        {
+            if (!mediaSource.DiscType.HasValue)
             {
-                VideoType.Dvd => GetInputArgument(GetPrimaryPlaylistVobFiles(path, null), mediaSource),
-                VideoType.BluRay => GetInputArgument(GetPrimaryPlaylistM2tsFiles(path), mediaSource),
-                _ => GetInputArgument(path, mediaSource)
+                return string.Empty;
+            }
+
+            if (!mediaSource.DiscTitle.HasValue)
+            {
+                // Background image providers may only have the physical source.
+                // They can use a unique title, but must never guess among several.
+                var titles = GetDiscTitles(mediaSource, CancellationToken.None).GetAwaiter().GetResult();
+                mediaSource.DiscTitle = titles.Count == 1 ? titles[0].Number
+                    : throw new InvalidOperationException("A disc title must be selected before probing or playback.");
+            }
+
+            var title = mediaSource.DiscTitle.Value;
+            return mediaSource.DiscType == IsoType.BluRay
+                ? "-playlist " + title.ToString(CultureInfo.InvariantCulture)
+                : "-f dvdvideo -title " + title.ToString(CultureInfo.InvariantCulture);
+        }
+
+        /// <inheritdoc />
+        public async Task<IReadOnlyList<DiscTitleInfo>> GetDiscTitles(MediaSourceInfo source, CancellationToken cancellationToken)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            var path = source.EncoderPath ?? source.Path;
+            if (source.DiscType == IsoType.BluRay)
+            {
+                return _blurayExaminer.GetTitles(path).Select(t => new DiscTitleInfo
+                {
+                    Number = int.Parse(Path.GetFileNameWithoutExtension(t.PlaylistName), NumberStyles.None, CultureInfo.InvariantCulture),
+                    RunTimeTicks = t.RunTimeTicks.GetValueOrDefault(),
+                    Chapters = t.Chapters.Select(c => new ChapterInfo { StartPositionTicks = TimeSpan.FromSeconds(c).Ticks }).ToArray()
+                }).ToArray();
+            }
+
+            var executable = Path.Combine(Path.GetDirectoryName(EncoderPath), OperatingSystem.IsWindows() ? "jellyfin-disc-info.exe" : "jellyfin-disc-info");
+            using var process = new Process
+            {
+                StartInfo = new ProcessStartInfo(executable)
+                {
+                    UseShellExecute = false,
+                    RedirectStandardOutput = true,
+                    RedirectStandardError = true
+                }
             };
+            process.StartInfo.ArgumentList.Add(path);
+            process.Start();
+            using var registration = cancellationToken.Register(() =>
+            {
+                if (!process.HasExited)
+                {
+                    process.Kill();
+                }
+            });
+            var output = process.StandardOutput.ReadToEndAsync(cancellationToken);
+            var errors = process.StandardError.ReadToEndAsync(cancellationToken);
+            await process.WaitForExitAsync(cancellationToken).ConfigureAwait(false);
+            var error = await errors.ConfigureAwait(false);
+            if (process.ExitCode != 0)
+            {
+                throw new FfmpegException("DVD title enumeration failed: " + error);
+            }
+
+            return JsonSerializer.Deserialize<DiscTitleInfo[]>(await output.ConfigureAwait(false), _jsonSerializerOptions);
         }
 
         /// <inheritdoc />
@@ -1355,7 +1444,7 @@ namespace MediaBrowser.MediaEncoding.Encoder
                         {
                             Path = path,
                             Protocol = MediaProtocol.File,
-                            VideoType = videoType
+                            VideoType = VideoType.VideoFile
                         }
                     },
                     CancellationToken.None).GetAwaiter().GetResult();

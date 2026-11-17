@@ -81,63 +81,36 @@ namespace MediaBrowser.Providers.MediaInfo
             where T : Video
         {
             BlurayDiscInfo? blurayDiscInfo = null;
+            string? titleKey = null;
+            var includeUnqualified = true;
 
             Model.MediaInfo.MediaInfo? mediaInfoResult = null;
 
             if (!item.IsShortcut || options.EnableRemoteContentProbe)
             {
-                if (item.VideoType == VideoType.Dvd)
+                var source = new MediaSourceInfo { Path = item.Path, VideoType = item.VideoType, IsoType = item.IsoType };
+                if (source.DiscType.HasValue)
                 {
-                    // Get list of playable .vob files
-                    var vobs = _mediaEncoder.GetPrimaryPlaylistVobFiles(item.Path, null);
-
-                    // Return if no playable .vob files are found
-                    if (vobs.Count == 0)
+                    var titles = await _mediaEncoder.GetDiscTitles(source, cancellationToken).ConfigureAwait(false);
+                    if (titles.Count == 0)
                     {
-                        _logger.LogError("No playable .vob files found in DVD structure, skipping FFprobe.");
-                        return ItemUpdateType.MetadataImport;
+                        throw new InvalidOperationException($"No navigable titles found in {item.Path}.");
                     }
 
-                    // Fetch metadata of first .vob file
-                    mediaInfoResult = await GetMediaInfo(
-                        new Video
+                    // A representative title supplies library metadata, not a playback default.
+                    // Playback resolves the user's explicit title before generating any URL.
+                    var title = titles.OrderByDescending(t => t.RunTimeTicks).ThenBy(t => t.Number).First();
+                    titleKey = DiscTitleInfo.GetKey(source.DiscType.Value, title.Number);
+                    includeUnqualified = titles.Count == 1;
+                    mediaInfoResult = await GetMediaInfo(item, cancellationToken, title).ConfigureAwait(false);
+                    if (source.DiscType == IsoType.BluRay)
+                    {
+                        blurayDiscInfo = new BlurayDiscInfo
                         {
-                            Path = vobs[0]
-                        },
-                        cancellationToken).ConfigureAwait(false);
-
-                    // Sum up the runtime of all .vob files skipping the first .vob
-                    for (var i = 1; i < vobs.Count; i++)
-                    {
-                        var tmpMediaInfo = await GetMediaInfo(
-                            new Video
-                            {
-                                Path = vobs[i]
-                            },
-                            cancellationToken).ConfigureAwait(false);
-
-                        mediaInfoResult.RunTimeTicks += tmpMediaInfo.RunTimeTicks;
+                            RunTimeTicks = title.RunTimeTicks,
+                            Chapters = title.Chapters.Select(c => TimeSpan.FromTicks(c.StartPositionTicks).TotalSeconds).ToArray()
+                        };
                     }
-                }
-                else if (item.VideoType == VideoType.BluRay)
-                {
-                    // Get BD disc information
-                    blurayDiscInfo = GetBDInfo(item.Path);
-
-                    // Return if no playable .m2ts files are found
-                    if (blurayDiscInfo is null || blurayDiscInfo.Files.Length == 0)
-                    {
-                        _logger.LogError("No playable .m2ts files found in Blu-ray structure, skipping FFprobe.");
-                        return ItemUpdateType.MetadataImport;
-                    }
-
-                    // Fetch metadata of first .m2ts file
-                    mediaInfoResult = await GetMediaInfo(
-                        new Video
-                        {
-                            Path = blurayDiscInfo.Files[0]
-                        },
-                        cancellationToken).ConfigureAwait(false);
                 }
                 else
                 {
@@ -147,14 +120,15 @@ namespace MediaBrowser.Providers.MediaInfo
                 cancellationToken.ThrowIfCancellationRequested();
             }
 
-            await Fetch(item, cancellationToken, mediaInfoResult, blurayDiscInfo, options).ConfigureAwait(false);
+            await Fetch(item, cancellationToken, mediaInfoResult, blurayDiscInfo, options, titleKey, includeUnqualified).ConfigureAwait(false);
 
             return ItemUpdateType.MetadataImport;
         }
 
         private Task<Model.MediaInfo.MediaInfo> GetMediaInfo(
             Video item,
-            CancellationToken cancellationToken)
+            CancellationToken cancellationToken,
+            DiscTitleInfo? title = null)
         {
             cancellationToken.ThrowIfCancellationRequested();
 
@@ -177,7 +151,8 @@ namespace MediaBrowser.Providers.MediaInfo
                         Path = path,
                         Protocol = protocol,
                         VideoType = item.VideoType,
-                        IsoType = item.IsoType
+                        IsoType = item.IsoType,
+                        DiscTitle = title?.Number
                     }
                 },
                 cancellationToken);
@@ -188,13 +163,15 @@ namespace MediaBrowser.Providers.MediaInfo
             CancellationToken cancellationToken,
             Model.MediaInfo.MediaInfo? mediaInfo,
             BlurayDiscInfo? blurayInfo,
-            MetadataRefreshOptions options)
+            MetadataRefreshOptions options,
+            string? titleKey = null,
+            bool includeUnqualified = true)
         {
             List<MediaStream> mediaStreams = new List<MediaStream>();
             IReadOnlyList<MediaAttachment> mediaAttachments;
             ChapterInfo[] chapters;
 
-            await AddExternalAudioAsync(video, mediaStreams, options, cancellationToken).ConfigureAwait(false);
+            await AddExternalAudioAsync(video, mediaStreams, options, cancellationToken, titleKey, includeUnqualified).ConfigureAwait(false);
 
             if (mediaInfo is not null)
             {
@@ -213,7 +190,7 @@ namespace MediaBrowser.Providers.MediaInfo
                 chapters = mediaInfo.Chapters ?? [];
                 if (blurayInfo is not null)
                 {
-                    FetchBdInfo(video, ref chapters, mediaStreams, blurayInfo);
+                    FetchBdInfo(video, ref chapters, blurayInfo);
                 }
             }
             else
@@ -231,7 +208,7 @@ namespace MediaBrowser.Providers.MediaInfo
             }
 
             // Download and insert external streams before the streams from the file to preserve stream IDs on remote videos
-            await AddExternalSubtitlesAsync(video, mediaStreams, options, cancellationToken).ConfigureAwait(false);
+            await AddExternalSubtitlesAsync(video, mediaStreams, options, cancellationToken, titleKey, includeUnqualified).ConfigureAwait(false);
 
             for (var i = 0; i < mediaStreams.Count; i++)
             {
@@ -313,57 +290,15 @@ namespace MediaBrowser.Providers.MediaInfo
             }
         }
 
-        private void FetchBdInfo(Video video, ref ChapterInfo[] chapters, List<MediaStream> mediaStreams, BlurayDiscInfo blurayInfo)
+        private static void FetchBdInfo(Video video, ref ChapterInfo[] chapters, BlurayDiscInfo blurayInfo)
         {
-            var ffmpegVideoStream = mediaStreams.FirstOrDefault(s => s.Type == MediaStreamType.Video);
-            var externalStreams = mediaStreams.Where(s => s.IsExternal).ToList();
-
-            // Fill video properties from the BDInfo result
-            mediaStreams.Clear();
-
-            // Rebuild the list with external streams first
-            int index = 0;
-            foreach (var stream in externalStreams.Concat(blurayInfo.MediaStreams))
+            // Keep ffprobe's actual stream ordering (including TrueHD compatibility
+            // streams); MPLS supplies only the title timeline and chapters.
+            video.RunTimeTicks = blurayInfo.RunTimeTicks;
+            chapters = blurayInfo.Chapters.Select(c => new ChapterInfo
             {
-                stream.Index = index++;
-                mediaStreams.Add(stream);
-            }
-
-            if (blurayInfo.RunTimeTicks.HasValue && blurayInfo.RunTimeTicks.Value > 0)
-            {
-                video.RunTimeTicks = blurayInfo.RunTimeTicks;
-            }
-
-            if (blurayInfo.Chapters is not null)
-            {
-                double[] brChapter = blurayInfo.Chapters;
-                chapters = new ChapterInfo[brChapter.Length];
-                for (int i = 0; i < brChapter.Length; i++)
-                {
-                    chapters[i] = new ChapterInfo
-                    {
-                        StartPositionTicks = TimeSpan.FromSeconds(brChapter[i]).Ticks
-                    };
-                }
-            }
-
-            var blurayVideoStream = mediaStreams.FirstOrDefault(s => s.Type == MediaStreamType.Video);
-
-            // Use the ffprobe values if these are empty
-            if (blurayVideoStream is not null && ffmpegVideoStream is not null)
-            {
-                // Always use ffmpeg's detected codec since that is what the rest of the codebase expects.
-                blurayVideoStream.Codec = ffmpegVideoStream.Codec;
-                blurayVideoStream.BitRate = blurayVideoStream.BitRate.GetValueOrDefault() == 0 ? ffmpegVideoStream.BitRate : blurayVideoStream.BitRate;
-                blurayVideoStream.Width = blurayVideoStream.Width.GetValueOrDefault() == 0 ? ffmpegVideoStream.Width : blurayVideoStream.Width;
-                blurayVideoStream.Height = blurayVideoStream.Height.GetValueOrDefault() == 0 ? ffmpegVideoStream.Height : blurayVideoStream.Height;
-                blurayVideoStream.ColorRange = ffmpegVideoStream.ColorRange;
-                blurayVideoStream.ColorSpace = ffmpegVideoStream.ColorSpace;
-                blurayVideoStream.ColorTransfer = ffmpegVideoStream.ColorTransfer;
-                blurayVideoStream.ColorPrimaries = ffmpegVideoStream.ColorPrimaries;
-                blurayVideoStream.BitDepth = ffmpegVideoStream.BitDepth;
-                blurayVideoStream.PixelFormat = ffmpegVideoStream.PixelFormat;
-            }
+                StartPositionTicks = TimeSpan.FromSeconds(c).Ticks
+            }).ToArray();
         }
 
         /// <summary>
@@ -544,21 +479,25 @@ namespace MediaBrowser.Providers.MediaInfo
         /// <param name="currentStreams">The current streams.</param>
         /// <param name="options">The refreshOptions.</param>
         /// <param name="cancellationToken">The cancellation token.</param>
+        /// <param name="titleKey">The selected disc title suffix, if any.</param>
+        /// <param name="includeUnqualified">Whether unqualified sidecars belong to this title.</param>
         /// <returns>Task.</returns>
         private async Task AddExternalSubtitlesAsync(
             Video video,
             List<MediaStream> currentStreams,
             MetadataRefreshOptions options,
-            CancellationToken cancellationToken)
+            CancellationToken cancellationToken,
+            string? titleKey,
+            bool includeUnqualified)
         {
-            var externalSubtitleStreams = await _subtitleResolver.GetExternalStreamsAsync(video, 0, options.DirectoryService, false, cancellationToken).ConfigureAwait(false);
+            var externalSubtitleStreams = await _subtitleResolver.GetExternalStreamsAsync(video, 0, options.DirectoryService, false, cancellationToken, titleKey, includeUnqualified).ConfigureAwait(false);
 
             var enableSubtitleDownloading = options.MetadataRefreshMode == MetadataRefreshMode.Default ||
                                             options.MetadataRefreshMode == MetadataRefreshMode.FullRefresh;
 
             var libraryOptions = _libraryManager.GetLibraryOptions(video);
 
-            if (enableSubtitleDownloading && libraryOptions.SubtitleDownloadLanguages is not null)
+            if (includeUnqualified && enableSubtitleDownloading && libraryOptions.SubtitleDownloadLanguages is not null)
             {
                 var downloadedLanguages = await new SubtitleDownloader(
                     _logger,
@@ -577,11 +516,14 @@ namespace MediaBrowser.Providers.MediaInfo
                 // Rescan
                 if (downloadedLanguages.Count > 0)
                 {
-                    externalSubtitleStreams = await _subtitleResolver.GetExternalStreamsAsync(video, 0, options.DirectoryService, true, cancellationToken).ConfigureAwait(false);
+                    externalSubtitleStreams = await _subtitleResolver.GetExternalStreamsAsync(video, 0, options.DirectoryService, true, cancellationToken, titleKey, includeUnqualified).ConfigureAwait(false);
                 }
             }
 
-            video.SubtitleFiles = externalSubtitleStreams.Select(i => i.Path).Distinct().ToArray();
+            // Keep the full inventory for change detection, but publish only this title's streams.
+            video.SubtitleFiles = titleKey is null
+                ? externalSubtitleStreams.Select(i => i.Path).Distinct().ToArray()
+                : _subtitleResolver.GetExternalFiles(video, options.DirectoryService, false).Select(i => i.Path).Distinct().ToArray();
 
             currentStreams.InsertRange(0, externalSubtitleStreams);
         }
@@ -593,15 +535,21 @@ namespace MediaBrowser.Providers.MediaInfo
         /// <param name="currentStreams">The current streams.</param>
         /// <param name="options">The refreshOptions.</param>
         /// <param name="cancellationToken">The cancellation token.</param>
+        /// <param name="titleKey">The selected disc title suffix, if any.</param>
+        /// <param name="includeUnqualified">Whether unqualified sidecars belong to this title.</param>
         private async Task AddExternalAudioAsync(
             Video video,
             List<MediaStream> currentStreams,
             MetadataRefreshOptions options,
-            CancellationToken cancellationToken)
+            CancellationToken cancellationToken,
+            string? titleKey,
+            bool includeUnqualified)
         {
-            var externalAudioStreams = await _audioResolver.GetExternalStreamsAsync(video, 0, options.DirectoryService, false, cancellationToken).ConfigureAwait(false);
+            var externalAudioStreams = await _audioResolver.GetExternalStreamsAsync(video, 0, options.DirectoryService, false, cancellationToken, titleKey, includeUnqualified).ConfigureAwait(false);
 
-            video.AudioFiles = externalAudioStreams.Select(i => i.Path).Distinct().ToArray();
+            video.AudioFiles = titleKey is null
+                ? externalAudioStreams.Select(i => i.Path).Distinct().ToArray()
+                : _audioResolver.GetExternalFiles(video, options.DirectoryService, false).Select(i => i.Path).Distinct().ToArray();
 
             currentStreams.AddRange(externalAudioStreams);
         }

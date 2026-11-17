@@ -166,34 +166,23 @@ namespace Emby.Server.Implementations.Library.Resolvers
         {
             if (video.VideoType == VideoType.Iso)
             {
-                if (video.Path.Contains("dvd", StringComparison.OrdinalIgnoreCase))
+                try
                 {
-                    video.IsoType = IsoType.Dvd;
-                }
-                else if (video.Path.Contains("bluray", StringComparison.OrdinalIgnoreCase))
-                {
-                    video.IsoType = IsoType.BluRay;
-                }
-                else
-                {
-                    try
+                    // The navigation libraries consume standard UDF Blu-ray/DVD images.
+                    using var videoFileStream = File.Open(video.Path, FileMode.Open, FileAccess.Read, FileShare.Read);
+                    using var disc = new UdfReader(videoFileStream);
+                    if (disc.DirectoryExists("VIDEO_TS") && disc.GetFiles("VIDEO_TS").Any(p => p.EndsWith("VIDEO_TS.IFO", StringComparison.OrdinalIgnoreCase)))
                     {
-                        // use disc-utils, both DVDs and BDs use UDF filesystem
-                        using var videoFileStream = File.Open(video.Path, FileMode.Open, FileAccess.Read, FileShare.Read);
-                        using UdfReader udfReader = new UdfReader(videoFileStream);
-                        if (udfReader.DirectoryExists("VIDEO_TS"))
-                        {
-                            video.IsoType = IsoType.Dvd;
-                        }
-                        else if (udfReader.DirectoryExists("BDMV"))
-                        {
-                            video.IsoType = IsoType.BluRay;
-                        }
+                        video.IsoType = IsoType.Dvd;
                     }
-                    catch (Exception ex)
+                    else if (disc.DirectoryExists("BDMV") && disc.GetFiles("BDMV").Any(p => p.EndsWith("index.bdmv", StringComparison.OrdinalIgnoreCase)))
                     {
-                        _logger.LogError(ex, "Error opening UDF/ISO image: {Value}", video.Path ?? video.Name);
+                        video.IsoType = IsoType.BluRay;
                     }
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogError(ex, "Error opening UDF/ISO image: {Value}", video.Path ?? video.Name);
                 }
             }
         }

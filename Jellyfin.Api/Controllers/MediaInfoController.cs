@@ -13,6 +13,7 @@ using MediaBrowser.Common.Extensions;
 using MediaBrowser.Controller.Devices;
 using MediaBrowser.Controller.Entities;
 using MediaBrowser.Controller.Library;
+using MediaBrowser.Model.Dlna;
 using MediaBrowser.Model.MediaInfo;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Http;
@@ -179,8 +180,20 @@ public class MediaInfoController : BaseJellyfinApiController
                 user,
                 Request,
                 mediaSourceId,
-                liveStreamId)
+                liveStreamId,
+                playbackInfoDto?.ForceDiscTitleSelection ?? false,
+                playbackInfoDto?.SupportsDiscTitleSelection == true && playbackInfoDto.StartTimeTicks == 0)
             .ConfigureAwait(false);
+
+        if (info.RequiresDiscTitleSelection)
+        {
+            if (playbackInfoDto?.SupportsDiscTitleSelection != true)
+            {
+                info.ErrorCode = PlaybackErrorCode.NoCompatibleStream;
+            }
+
+            return info;
+        }
 
         if (info.ErrorCode is not null)
         {

@@ -578,6 +578,12 @@ namespace MediaBrowser.Model.Entities
         public int Index { get; set; }
 
         /// <summary>
+        /// Gets or sets the native input index for a probed disc title. This is
+        /// independent of the public index after sidecars or library filtering.
+        /// </summary>
+        public int? InputStreamIndex { get; set; }
+
+        /// <summary>
         /// Gets or sets the score.
         /// </summary>
         /// <value>The score.</value>

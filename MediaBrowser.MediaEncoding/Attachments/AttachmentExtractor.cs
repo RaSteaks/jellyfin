@@ -68,9 +68,17 @@ namespace MediaBrowser.MediaEncoding.Attachments
                 throw new ArgumentNullException(nameof(mediaSourceId));
             }
 
-            var mediaSources = await _mediaSourceManager.GetPlaybackMediaSources(item, null, true, false, cancellationToken).ConfigureAwait(false);
-            var mediaSource = mediaSources
-                .FirstOrDefault(i => string.Equals(i.Id, mediaSourceId, StringComparison.OrdinalIgnoreCase));
+            MediaSourceInfo? mediaSource;
+            if (mediaSourceId.StartsWith("disc-", StringComparison.Ordinal))
+            {
+                mediaSource = await _mediaSourceManager.GetMediaSource(item, mediaSourceId, null, false, cancellationToken).ConfigureAwait(false);
+            }
+            else
+            {
+                var mediaSources = await _mediaSourceManager.GetPlaybackMediaSources(item, null, true, false, cancellationToken).ConfigureAwait(false);
+                mediaSource = mediaSources.FirstOrDefault(i => string.Equals(i.Id, mediaSourceId, StringComparison.OrdinalIgnoreCase));
+            }
+
             if (mediaSource is null)
             {
                 throw new ResourceNotFoundException($"MediaSource {mediaSourceId} not found");

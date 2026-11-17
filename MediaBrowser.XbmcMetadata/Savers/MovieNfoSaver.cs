@@ -47,15 +47,17 @@ namespace MediaBrowser.XbmcMetadata.Savers
         internal static IEnumerable<string> GetMovieSavePaths(ItemInfo item)
         {
             var path = item.ContainingFolderPath;
-            if (item.VideoType == VideoType.Dvd && !item.IsPlaceHolder)
-            {
-                yield return Path.Combine(path, "VIDEO_TS", "VIDEO_TS.nfo");
-            }
-
             // only allow movie object to read movie.nfo, not owned videos (which will be itemtype video, not movie)
             if (!item.IsInMixedFolder && item.ItemType == typeof(Movie))
             {
                 yield return Path.Combine(path, "movie.nfo");
+            }
+
+            // Prefer the movie-level identity consistently for DVD and Blu-ray;
+            // retain the legacy DVD location as a fallback for existing libraries.
+            if (item.VideoType == VideoType.Dvd && !item.IsPlaceHolder)
+            {
+                yield return Path.Combine(path, "VIDEO_TS", "VIDEO_TS.nfo");
             }
 
             if (!item.IsPlaceHolder && (item.VideoType == VideoType.Dvd || item.VideoType == VideoType.BluRay))

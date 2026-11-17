@@ -841,7 +841,7 @@ namespace Emby.Server.Implementations.Library
             IEnumerable<FileSystemMetadata> siblings;
             try
             {
-                siblings = _fileSystem.GetFiles(directory);
+                siblings = _fileSystem.DirectoryExists(path) ? _fileSystem.GetDirectories(directory) : _fileSystem.GetFiles(directory);
             }
             catch (Exception ex)
             {
@@ -913,6 +913,7 @@ namespace Emby.Server.Implementations.Library
                     correctVideo.Path = resolved.Path;
                     correctVideo.Name = resolved.Name;
                     correctVideo.VideoType = resolved.VideoType;
+                    correctVideo.IsoType = resolved.IsoType;
                     correctVideo.ProductionYear = resolved.ProductionYear;
                     correctVideo.ExtraType = resolved.ExtraType;
                     resolved = correctVideo;
@@ -920,6 +921,7 @@ namespace Emby.Server.Implementations.Library
             }
 
             resolved.Id = expectedId;
+            SetAdditionalPartsFromStack(resolved, path);
             return resolved;
         }
 
@@ -2477,10 +2479,6 @@ namespace Emby.Server.Implementations.Library
                                 altVideo.OwnerId = video.Id;
                                 altVideo.SetPrimaryVersionId(video.Id);
                                 altVideo.IsInMixedFolder = video.IsInMixedFolder;
-                                // ResolveAlternateVersion only sees the alternate's primary file.
-                                // If the alternate is itself a stack (e.g. 1080p part1 + part2),
-                                // detect its parts from sibling files so its AdditionalParts persist.
-                                SetAdditionalPartsFromStack(altVideo, path);
                                 allItems.Add(altVideo);
                             }
                         }
@@ -2702,10 +2700,6 @@ namespace Emby.Server.Implementations.Library
                                 altVideo.OwnerId = video.Id;
                                 altVideo.SetPrimaryVersionId(video.Id);
                                 altVideo.IsInMixedFolder = video.IsInMixedFolder;
-                                // ResolveAlternateVersion only sees the alternate's primary file.
-                                // If the alternate is itself a stack (e.g. 1080p part1 + part2),
-                                // detect its parts from sibling files so its AdditionalParts persist.
-                                SetAdditionalPartsFromStack(altVideo, path);
                                 allItems.Add(altVideo);
                             }
                         }

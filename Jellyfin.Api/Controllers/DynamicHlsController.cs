@@ -1411,7 +1411,8 @@ public class DynamicHlsController : BaseJellyfinApiController
         }
 
         var request = new CreateMainPlaylistRequest(
-            mediaSourceId is null ? null : Guid.Parse(mediaSourceId),
+            // File keyframe indices do not describe a navigated disc title.
+            state.MediaSource.DiscTitle.HasValue || mediaSourceId is null ? null : Guid.Parse(mediaSourceId),
             state.MediaPath,
             segmentLength,
             state.RunTimeTicks ?? 0,

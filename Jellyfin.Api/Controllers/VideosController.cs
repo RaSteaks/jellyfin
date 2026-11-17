@@ -89,12 +89,13 @@ public class VideosController : BaseJellyfinApiController
     /// </summary>
     /// <param name="itemId">The item id.</param>
     /// <param name="userId">Optional. Filter by user id, and attach user data.</param>
+    /// <param name="mediaSourceId">Optional selected disc title source.</param>
     /// <response code="200">Additional parts returned.</response>
     /// <returns>A <see cref="QueryResult{BaseItemDto}"/> with the parts.</returns>
     [HttpGet("{itemId}/AdditionalParts")]
     [Authorize]
     [ProducesResponseType(StatusCodes.Status200OK)]
-    public ActionResult<QueryResult<BaseItemDto>> GetAdditionalPart([FromRoute, Required] Guid itemId, [FromQuery] Guid? userId)
+    public async Task<ActionResult<QueryResult<BaseItemDto>>> GetAdditionalPart([FromRoute, Required] Guid itemId, [FromQuery] Guid? userId, [FromQuery] string? mediaSourceId = null)
     {
         userId = RequestHelpers.GetUserId(User, userId);
         var user = userId.IsNullOrEmpty()
@@ -111,12 +112,31 @@ public class VideosController : BaseJellyfinApiController
             return NotFound();
         }
 
+        Guid? selectedDisc = null;
+        if (mediaSourceId?.StartsWith("disc-", StringComparison.Ordinal) == true)
+        {
+            var source = await _mediaSourceManager.GetMediaSource(item, mediaSourceId, null, false, HttpContext.RequestAborted).ConfigureAwait(false);
+            if (source is null)
+            {
+                return NotFound();
+            }
+
+            selectedDisc = source.DiscItemId;
+            item = _libraryManager.GetItemById<Video>(source.DiscVersionId!.Value, user);
+        }
+
         var dtoOptions = new DtoOptions();
 
         BaseItemDto[] items;
         if (item is Video video)
         {
-            items = video.GetAdditionalParts(user)
+            var parts = video.GetAdditionalParts(user).ToArray();
+            if (selectedDisc.HasValue && selectedDisc.Value != video.Id)
+            {
+                parts = parts.SkipWhile(p => p.Id != selectedDisc.Value).Skip(1).ToArray();
+            }
+
+            items = parts
                 .Select(i => _dtoService.GetBaseItemDto(i, dtoOptions, user, video))
                 .ToArray();
         }

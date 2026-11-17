@@ -98,6 +98,9 @@ public class JellyfinDbContext(DbContextOptions<JellyfinDbContext> options, ILog
     /// </summary>
     public DbSet<UserData> UserData => Set<UserData>();
 
+    /// <summary>Gets the per-title disc playback states.</summary>
+    public DbSet<DiscPlaybackState> DiscPlaybackStates => Set<DiscPlaybackState>();
+
     /// <summary>
     /// Gets the <see cref="DbSet{TEntity}"/> containing the user data.
     /// </summary>

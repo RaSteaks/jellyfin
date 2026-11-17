@@ -1338,7 +1338,11 @@ namespace MediaBrowser.Controller.Entities
             var path = item.Path;
             if (item.IsFileProtocol && !string.IsNullOrEmpty(path))
             {
-                var displayName = System.IO.Path.GetFileNameWithoutExtension(path);
+                // A disc edition may be represented by its first part (Disc1).
+                // Label it with the edition directory, preserving dots in directory names.
+                var displayName = item is Video { IsPlaceHolder: false, VideoType: VideoType.BluRay or VideoType.Dvd }
+                    ? System.IO.Path.GetFileName(item.ContainingFolderPath)
+                    : System.IO.Path.GetFileNameWithoutExtension(path);
 
                 // Prefer the suffix that differs from the other versions: strip the prefix shared by
                 // all sibling files. This works regardless of folder layout, so it also labels episode

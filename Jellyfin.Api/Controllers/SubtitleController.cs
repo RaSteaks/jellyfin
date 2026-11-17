@@ -504,8 +504,10 @@ public class SubtitleController : BaseJellyfinApiController
         }
 
         var idString = id.ToString("N", CultureInfo.InvariantCulture);
-        var mediaSource = _mediaSourceManager.GetStaticMediaSources(item, false)
-            .FirstOrDefault(i => string.Equals(i.Id, mediaSourceId ?? idString, StringComparison.OrdinalIgnoreCase));
+        var mediaSource = mediaSourceId?.StartsWith("disc-", StringComparison.Ordinal) == true
+            ? await _mediaSourceManager.GetMediaSource(item, mediaSourceId, null, false, HttpContext.RequestAborted).ConfigureAwait(false)
+            : _mediaSourceManager.GetStaticMediaSources(item, false)
+                .FirstOrDefault(i => string.Equals(i.Id, mediaSourceId ?? idString, StringComparison.OrdinalIgnoreCase));
 
         var subtitleStream = mediaSource?.MediaStreams
             .FirstOrDefault(i => i.Type == MediaStreamType.Subtitle && i.Index == index);

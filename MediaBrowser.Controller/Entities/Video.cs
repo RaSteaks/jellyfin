@@ -494,7 +494,7 @@ namespace MediaBrowser.Controller.Entities
             return GetAdditionalPartIds()
                 .Select(i => LibraryManager.GetItemById<Video>(i))
                 .Where(i => i is not null && (user is null || i.IsVisible(user)))
-                .OrderBy(i => i.SortName);
+                .OrderBy(i => Array.IndexOf(AdditionalParts, i.Path));
         }
 
         internal override ItemUpdateType UpdateFromResolvedItem(BaseItem newItem)
@@ -520,6 +520,12 @@ namespace MediaBrowser.Controller.Entities
                     VideoType = newVideo.VideoType;
                     updateType |= ItemUpdateType.MetadataImport;
                 }
+
+                if (IsoType != newVideo.IsoType)
+                {
+                    IsoType = newVideo.IsoType;
+                    updateType |= ItemUpdateType.MetadataImport;
+                }
             }
 
             return updateType;
@@ -538,7 +544,7 @@ namespace MediaBrowser.Controller.Entities
             // Clean up LocalAlternateVersions - remove paths that no longer exist
             if (LocalAlternateVersions.Length > 0)
             {
-                var validPaths = LocalAlternateVersions.Where(FileSystem.FileExists).ToArray();
+                var validPaths = LocalAlternateVersions.Where(p => FileSystem.FileExists(p) || FileSystem.DirectoryExists(p)).ToArray();
                 if (validPaths.Length != LocalAlternateVersions.Length)
                 {
                     LocalAlternateVersions = validPaths;
@@ -585,7 +591,7 @@ namespace MediaBrowser.Controller.Entities
             // before refreshing. This must happen here rather than in RefreshMetadataForOwnedVideo
             // because that method is also used for stacked parts which should keep their resolved type.
             var id = LibraryManager.GetNewItemId(path, GetType());
-            if (LibraryManager.GetItemById(id) is not Video && FileSystem.FileExists(path))
+            if (LibraryManager.GetItemById(id) is not Video && (FileSystem.FileExists(path) || FileSystem.DirectoryExists(path)))
             {
                 var parentFolder = GetParent() as Folder;
                 var collectionType = LibraryManager.GetContentType(this);
@@ -647,10 +653,10 @@ namespace MediaBrowser.Controller.Entities
 
             var id = LibraryManager.GetNewItemId(path, itemType);
 
-            // Check if the file still exists
-            if (!FileSystem.FileExists(path))
+            // Owned editions and parts may be disc directories as well as files.
+            if (!FileSystem.FileExists(path) && !FileSystem.DirectoryExists(path))
             {
-                // File was removed - clean up any orphaned database entry
+                // The source was removed - clean up its orphaned database entry
                 if (LibraryManager.GetItemById(id) is Video orphanedVideo && orphanedVideo.OwnerId.Equals(Id))
                 {
                     Logger.LogInformation("Owned video file no longer exists, removing orphaned item: {Path}", path);
@@ -680,6 +686,7 @@ namespace MediaBrowser.Controller.Entities
                     correctVideo.Path = video.Path;
                     correctVideo.Name = video.Name;
                     correctVideo.VideoType = video.VideoType;
+                    correctVideo.IsoType = video.IsoType;
                     correctVideo.ProductionYear = video.ProductionYear;
                     correctVideo.ExtraType = video.ExtraType;
                     video = correctVideo;

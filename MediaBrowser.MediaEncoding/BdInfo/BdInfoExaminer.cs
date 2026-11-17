@@ -1,8 +1,10 @@
 using System;
 using System.Collections.Generic;
 using System.Globalization;
+using System.IO;
 using System.Linq;
 using BDInfo;
+using DiscUtils.Udf;
 using Jellyfin.Extensions;
 using MediaBrowser.Model.Entities;
 using MediaBrowser.Model.IO;
@@ -38,23 +40,30 @@ public class BdInfoExaminer : IBlurayExaminer
             throw new ArgumentNullException(nameof(path));
         }
 
-        var bdrom = new BDROM(BdInfoDirectoryInfo.FromFileSystemPath(_fileSystem, path));
+        return GetTitles(path).OrderByDescending(t => t.RunTimeTicks).FirstOrDefault()
+            ?? new BlurayDiscInfo { Files = [], MediaStreams = [], Chapters = [] };
+    }
 
+    /// <inheritdoc />
+    public IReadOnlyList<BlurayDiscInfo> GetTitles(string path)
+    {
+        // BDInfo completes all reads while the image and its filesystem are alive.
+        using var image = File.Exists(path) ? File.OpenRead(path) : null;
+        using var udf = image is null ? null : new UdfReader(image);
+        var root = udf is null
+            ? BdInfoDirectoryInfo.FromFileSystemPath(_fileSystem, path)
+            : new UdfDirectoryInfo(udf, string.Empty);
+        var bdrom = new BDROM(root);
         bdrom.Scan();
+        return bdrom.PlaylistFiles.Values.Where(p => p.IsValid)
+            .OrderBy(p => p.Name, StringComparer.Ordinal)
+            .Select(ReadPlaylist)
+            .ToArray();
+    }
 
-        // Get the longest playlist
-        var playlist = bdrom.PlaylistFiles.Values.OrderByDescending(p => p.TotalLength).FirstOrDefault(p => p.IsValid);
-
-        var outputStream = new BlurayDiscInfo
-        {
-            MediaStreams = Array.Empty<MediaStream>()
-        };
-
-        if (playlist is null)
-        {
-            return outputStream;
-        }
-
+    private BlurayDiscInfo ReadPlaylist(TSPlaylistFile playlist)
+    {
+        var outputStream = new BlurayDiscInfo { Files = [], MediaStreams = [] };
         outputStream.Chapters = playlist.Chapters.ToArray();
 
         outputStream.RunTimeTicks = TimeSpan.FromSeconds(playlist.TotalLength).Ticks;

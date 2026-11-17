@@ -81,20 +81,24 @@ namespace MediaBrowser.Providers.MediaInfo
         /// <param name="directoryService">The directory service to search for files.</param>
         /// <param name="clearCache">True if the directory service cache should be cleared before searching.</param>
         /// <param name="cancellationToken">The cancellation token.</param>
+        /// <param name="titleKey">Optional title-specific filename suffix.</param>
+        /// <param name="includeUnqualified">Whether unqualified sidecars belong to this title.</param>
         /// <returns>The external streams located.</returns>
         public async Task<IReadOnlyList<MediaStream>> GetExternalStreamsAsync(
             Video video,
             int startIndex,
             IDirectoryService directoryService,
             bool clearCache,
-            CancellationToken cancellationToken)
+            CancellationToken cancellationToken,
+            string? titleKey = null,
+            bool includeUnqualified = true)
         {
             if (!video.IsFileProtocol)
             {
                 return Array.Empty<MediaStream>();
             }
 
-            var pathInfos = GetExternalFiles(video, directoryService, clearCache);
+            var pathInfos = GetExternalFiles(video, directoryService, clearCache, titleKey, includeUnqualified);
 
             if (!pathInfos.Any())
             {
@@ -200,11 +204,15 @@ namespace MediaBrowser.Providers.MediaInfo
         /// <param name="video">The <see cref="Video"/> object to search external files for.</param>
         /// <param name="directoryService">The directory service to search for files.</param>
         /// <param name="clearCache">True if the directory service cache should be cleared before searching.</param>
+        /// <param name="titleKey">Optional title-specific filename suffix.</param>
+        /// <param name="includeUnqualified">Whether unqualified sidecars belong to this title.</param>
         /// <returns>The external file paths located.</returns>
         public IReadOnlyList<ExternalPathParserResult> GetExternalFiles(
             Video video,
             IDirectoryService directoryService,
-            bool clearCache)
+            bool clearCache,
+            string? titleKey = null,
+            bool includeUnqualified = true)
         {
             if (!video.IsFileProtocol)
             {
@@ -212,7 +220,10 @@ namespace MediaBrowser.Providers.MediaInfo
             }
 
             // Check if video folder exists
-            string folder = video.ContainingFolderPath;
+            // A stacked disc's containing folder is the shared movie directory.
+            // Sidecars belong to the selected disc, never to its siblings.
+            var isDiscDirectory = !video.IsPlaceHolder && video.VideoType is VideoType.BluRay or VideoType.Dvd;
+            string folder = isDiscDirectory ? video.Path : video.ContainingFolderPath;
             if (!_fileSystem.DirectoryExists(folder))
             {
                 return Array.Empty<ExternalPathParserResult>();
@@ -245,24 +256,51 @@ namespace MediaBrowser.Providers.MediaInfo
                 : null;
 
             var externalPathInfos = new List<ExternalPathParserResult>();
-            ReadOnlySpan<char> prefix = video.FileNameWithoutExtension;
-            foreach (var file in files)
+            var prefixes = new List<string>();
+            if (titleKey is not null)
+            {
+                prefixes.Add(video.FileNameWithoutExtension + "." + titleKey);
+            }
+
+            if (includeUnqualified)
+            {
+                prefixes.Add(video.FileNameWithoutExtension);
+            }
+
+            foreach (var file in titleKey is null ? files.AsEnumerable() : files.Order(StringComparer.Ordinal))
             {
                 if (IsSuppressedVobSubFile(file, pairedVobSubKeys))
                 {
                     continue;
                 }
 
-                var fileNameWithoutExtension = Path.GetFileNameWithoutExtension(file.AsSpan());
-                if (fileNameWithoutExtension.Length >= prefix.Length
-                    && prefix.Equals(fileNameWithoutExtension[..prefix.Length], StringComparison.OrdinalIgnoreCase)
-                    && (fileNameWithoutExtension.Length == prefix.Length || _namingOptions.MediaFlagDelimiters.Contains(fileNameWithoutExtension[prefix.Length])))
+                var candidates = prefixes.AsEnumerable();
+                if (isDiscDirectory && string.Equals(Path.GetDirectoryName(file), folder, StringComparison.Ordinal))
                 {
-                    var externalPathInfo = _externalPathParser.ParseFile(file, fileNameWithoutExtension[prefix.Length..].ToString());
-
-                    if (externalPathInfo is not null)
+                    candidates = candidates.Concat(titleKey is null ? [] : new[] { "movie." + titleKey });
+                    if (includeUnqualified)
                     {
-                        externalPathInfos.Add(externalPathInfo);
+                        candidates = candidates.Append("movie");
+                    }
+                }
+
+                var name = Path.GetFileNameWithoutExtension(file);
+                var prefix = candidates.FirstOrDefault(p => name.StartsWith(p, StringComparison.OrdinalIgnoreCase)
+                    && (name.Length == p.Length || _namingOptions.MediaFlagDelimiters.Contains(name[p.Length])));
+                if (prefix is not null)
+                {
+                    var flags = name[prefix.Length..];
+                    // A sidecar explicitly naming another title is never a generic sidecar.
+                    if (titleKey is not null && (flags.StartsWith(".bd-", StringComparison.OrdinalIgnoreCase)
+                        || flags.StartsWith(".dvd-", StringComparison.OrdinalIgnoreCase)))
+                    {
+                        continue;
+                    }
+
+                    var parsed = _externalPathParser.ParseFile(file, flags);
+                    if (parsed is not null)
+                    {
+                        externalPathInfos.Add(parsed);
                     }
                 }
             }

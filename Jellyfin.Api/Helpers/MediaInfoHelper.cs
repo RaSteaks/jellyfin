@@ -89,17 +89,52 @@ public class MediaInfoHelper
     /// <param name="request">The current <see cref="HttpRequest"/>.</param>
     /// <param name="mediaSourceId">Media source id.</param>
     /// <param name="liveStreamId">Live stream id.</param>
+    /// <param name="forceDiscTitleSelection">Whether to ignore the remembered title.</param>
+    /// <param name="startFromBeginning">Whether to start at the first part of the selected version.</param>
     /// <returns>A <see cref="Task"/> containing the <see cref="PlaybackInfoResponse"/>.</returns>
     public async Task<PlaybackInfoResponse> GetPlaybackInfo(
         BaseItem item,
         User? user,
         HttpRequest request,
         string? mediaSourceId = null,
-        string? liveStreamId = null)
+        string? liveStreamId = null,
+        bool forceDiscTitleSelection = false,
+        bool startFromBeginning = false)
     {
         var result = new PlaybackInfoResponse();
 
         var mediaSources = await ResolvePlaybackMediaSources(item, user, mediaSourceId, liveStreamId).ConfigureAwait(false);
+
+        if (mediaSources.Length > 0 && mediaSources[0].DiscTitle.HasValue)
+        {
+            if (startFromBeginning)
+            {
+                var version = mediaSources[0].DiscVersionId;
+                mediaSources = mediaSources.OrderByDescending(s => s.DiscVersionId == version && s.DiscPartIndex == 1).ToArray();
+            }
+
+            var candidates = mediaSources.Where(s => s.DiscItemId == mediaSources[0].DiscItemId).ToArray();
+            var explicitTitle = mediaSourceId?.StartsWith("disc-", StringComparison.Ordinal) == true;
+            var chosen = explicitTitle ? candidates[0] : candidates.FirstOrDefault(s => s.DiscTitleSelected && !forceDiscTitleSelection);
+            if (chosen is null)
+            {
+                result.MediaSources = candidates;
+                result.RequiresDiscTitleSelection = true;
+                return result;
+            }
+
+            var probed = await _mediaSourceManager.GetMediaSource(item, chosen.Id, null, false, request.HttpContext.RequestAborted).ConfigureAwait(false);
+            probed.SupportsDirectStream = chosen.SupportsDirectStream;
+            probed.SupportsTranscoding = chosen.SupportsTranscoding;
+            probed.DiscResumePositionTicks = chosen.DiscResumePositionTicks;
+            probed.DiscTitleSelected = true;
+            if (user is not null)
+            {
+                _mediaSourceManager.SetDefaultAudioAndSubtitleStreamIndices(item, probed, user);
+            }
+
+            mediaSources = new[] { probed };
+        }
 
         if (mediaSources.Length == 0)
         {
@@ -153,7 +188,9 @@ public class MediaInfoHelper
         }
 
         return mediaSourcesList
-            .Where(i => string.Equals(i.Id, mediaSourceId, StringComparison.OrdinalIgnoreCase))
+            .Where(i => string.Equals(i.Id, mediaSourceId, StringComparison.OrdinalIgnoreCase)
+                || (i.DiscItemId.HasValue && string.Equals(i.DiscItemId.Value.ToString("N"), mediaSourceId, StringComparison.OrdinalIgnoreCase))
+                || (i.DiscVersionId.HasValue && string.Equals(i.DiscVersionId.Value.ToString("N"), mediaSourceId, StringComparison.OrdinalIgnoreCase)))
             .ToArray();
     }
 

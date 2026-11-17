@@ -125,10 +125,16 @@ namespace MediaBrowser.MediaEncoding.Subtitles
                 throw new ArgumentNullException(nameof(mediaSourceId));
             }
 
-            var mediaSources = await _mediaSourceManager.GetPlaybackMediaSources(item, null, true, false, cancellationToken).ConfigureAwait(false);
-
-            var mediaSource = mediaSources
-                .First(i => string.Equals(i.Id, mediaSourceId, StringComparison.OrdinalIgnoreCase));
+            MediaSourceInfo mediaSource;
+            if (mediaSourceId.StartsWith("disc-", StringComparison.Ordinal))
+            {
+                mediaSource = await _mediaSourceManager.GetMediaSource(item, mediaSourceId, null, false, cancellationToken).ConfigureAwait(false);
+            }
+            else
+            {
+                var mediaSources = await _mediaSourceManager.GetPlaybackMediaSources(item, null, true, false, cancellationToken).ConfigureAwait(false);
+                mediaSource = mediaSources.First(i => string.Equals(i.Id, mediaSourceId, StringComparison.OrdinalIgnoreCase));
+            }
 
             var subtitleStream = mediaSource.MediaStreams
                .First(i => i.Type == MediaStreamType.Subtitle && i.Index == subtitleStreamIndex);
@@ -600,7 +606,7 @@ namespace MediaBrowser.MediaEncoding.Subtitles
 
             foreach (string mksFile in mksFiles)
             {
-                var inputPath = _mediaEncoder.GetInputArgument(mksFile, mediaSource);
+                var inputPath = _mediaEncoder.GetExternalSubtitleInputArgument(mksFile);
                 var outputPaths = new List<string>();
                 var args = string.Format(
                     CultureInfo.InvariantCulture,
@@ -661,8 +667,9 @@ namespace MediaBrowser.MediaEncoding.Subtitles
             var outputPaths = new List<string>();
             var args = string.Format(
                 CultureInfo.InvariantCulture,
-                "-y -i {0}",
-                inputPath);
+                "-y {1} -i {0}",
+                inputPath,
+                _mediaEncoder.GetInputOptions(mediaSource));
 
             foreach (var subtitleStream in subtitleStreams)
             {
@@ -813,15 +820,14 @@ namespace MediaBrowser.MediaEncoding.Subtitles
                 {
                     var subtitleStreamIndex = EncodingHelper.FindIndex(mediaSource.MediaStreams, subtitleStream);
 
-                    var args = _mediaEncoder.GetInputArgument(mediaSource.Path, mediaSource);
-
-                    if (subtitleStream.IsExternal)
-                    {
-                        args = _mediaEncoder.GetExternalSubtitleInputArgument(subtitleStream.Path);
-                    }
+                    var args = subtitleStream.IsExternal
+                        ? _mediaEncoder.GetExternalSubtitleInputArgument(subtitleStream.Path)
+                        : _mediaEncoder.GetInputPathArgument(mediaSource.Path, mediaSource);
+                    var inputOptions = subtitleStream.IsExternal ? string.Empty : _mediaEncoder.GetInputOptions(mediaSource);
 
                     await ExtractTextSubtitleInternal(
                         args,
+                        inputOptions,
                         subtitleStreamIndex,
                         outputCodec,
                         outputPath,
@@ -832,6 +838,7 @@ namespace MediaBrowser.MediaEncoding.Subtitles
 
         private async Task ExtractTextSubtitleInternal(
             string inputPath,
+            string inputOptions,
             int subtitleStreamIndex,
             string outputCodec,
             string outputPath,
@@ -844,11 +851,12 @@ namespace MediaBrowser.MediaEncoding.Subtitles
             Directory.CreateDirectory(Path.GetDirectoryName(outputPath) ?? throw new ArgumentException($"Provided path ({outputPath}) is not valid.", nameof(outputPath)));
             var processArgs = string.Format(
                 CultureInfo.InvariantCulture,
-                "-y -i {0} -copyts -map 0:{1} -an -vn -c:s {2} \"{3}\"",
+                "-y {4} -i {0} -copyts -map 0:{1} -an -vn -c:s {2} \"{3}\"",
                 inputPath,
                 subtitleStreamIndex,
                 outputCodec,
-                outputPath);
+                outputPath,
+                inputOptions);
 
             await ExtractSubtitlesForFile(
                 inputPath,

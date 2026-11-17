@@ -475,6 +475,26 @@ namespace Emby.Server.Implementations.Library.Resolvers.Movies
             var result = ResolveVideos<T>(parent, fileSystemEntries, SupportsMultiVersion, collectionType, parseName) ??
                 new MultiItemResolverResult();
 
+            // The same strict edition prefix used by file versions also applies to
+            // directory discs. Unrelated child names keep a collection as a folder.
+            var editionPrefix = Path.GetFileName(path) + " - ";
+            if ((collectionType == CollectionType.movies || collectionType is null)
+                && multiDiscFolders.Count > 0
+                && multiDiscFolders.All(f => f.Name.StartsWith(editionPrefix, StringComparison.Ordinal))
+                && result.Items.All(v => Path.GetFileName(v.Path).StartsWith(editionPrefix, StringComparison.Ordinal)))
+            {
+                var directoryVersions = multiDiscFolders.OrderBy(f => f.Name, StringComparer.Ordinal)
+                    .Select(f => FindMovie<T>(args, f.FullName, parent, directoryService.GetFileSystemEntries(f.FullName).ToList(), directoryService, collectionType, parseName))
+                    .ToArray();
+                if (directoryVersions.All(v => v is not null) && directoryVersions.Length + result.Items.Count > 1)
+                {
+                    var versions = result.Items.Cast<T>().Concat(directoryVersions).OrderBy(v => v.Path, StringComparer.Ordinal).ToArray();
+                    versions[0].LocalAlternateVersions = versions[0].LocalAlternateVersions
+                        .Concat(versions.Skip(1).SelectMany(v => v.LocalAlternateVersions.Prepend(v.Path))).ToArray();
+                    return versions[0];
+                }
+            }
+
             var isPhotosCollection = collectionType == CollectionType.homevideos || collectionType == CollectionType.photos;
             if (!isPhotosCollection && result.Items.Count == 1)
             {
@@ -552,18 +572,22 @@ namespace Emby.Server.Implementations.Library.Resolvers.Movies
                 return null;
             }
 
-            if (folderPaths.Count == 0)
+            // A collection may contain a disc stack alongside unrelated films or
+            // folders. Only consume the parent when every candidate belongs to
+            // the same stack; otherwise let the normal folder scan visit each one.
+            if (folderPaths.Count < 2 || folderPaths.Count != multiDiscFolders.Count)
             {
                 return null;
             }
 
             var result = StackResolver.ResolveDirectories(folderPaths, NamingOptions).ToList();
 
-            if (result.Count != 1)
+            if (result.Count != 1 || result[0].Files.Count != folderPaths.Count)
             {
                 return null;
             }
 
+            folderPaths = result[0].Files.ToList();
             int additionalPartsLen = folderPaths.Count - 1;
             var additionalParts = new string[additionalPartsLen];
             folderPaths.CopyTo(1, additionalParts, 0, additionalPartsLen);
@@ -573,7 +597,7 @@ namespace Emby.Server.Implementations.Library.Resolvers.Movies
                 Path = folderPaths[0],
                 AdditionalParts = additionalParts,
                 VideoType = videoTypes[0],
-                Name = result[0].Name
+                Name = string.IsNullOrEmpty(result[0].Name) ? Path.GetFileName(Path.GetDirectoryName(folderPaths[0])) : result[0].Name
             };
 
             SetIsoType(returnVideo);

@@ -35,5 +35,8 @@ namespace MediaBrowser.Model.MediaInfo
         /// </summary>
         /// <value>The error code.</value>
         public PlaybackErrorCode? ErrorCode { get; set; }
+
+        /// <summary>Gets or sets whether the client must choose a disc title before requesting playback.</summary>
+        public bool RequiresDiscTitleSelection { get; set; }
     }
 }

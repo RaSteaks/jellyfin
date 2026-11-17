@@ -332,7 +332,7 @@ public class DynamicHlsHelper
             AppendPlaylist(builder, state, variantUrl, newBitrate, subtitleGroup);
         }
 
-        if (!isLiveStream && (state.VideoRequest?.EnableTrickplay ?? false))
+        if (!isLiveStream && !state.MediaSource.DiscTitle.HasValue && (state.VideoRequest?.EnableTrickplay ?? false))
         {
             var sourceId = Guid.Parse(state.Request.MediaSourceId);
             var trickplayResolutions = await _trickplayManager.GetTrickplayResolutions(sourceId).ConfigureAwait(false);

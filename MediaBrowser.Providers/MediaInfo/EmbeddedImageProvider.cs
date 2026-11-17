@@ -114,6 +114,7 @@ namespace MediaBrowser.Providers.MediaInfo
         {
             MediaSourceInfo mediaSource = new MediaSourceInfo
             {
+                Path = item.Path,
                 VideoType = item.VideoType,
                 IsoType = item.IsoType,
                 Protocol = item.PathProtocol ?? MediaProtocol.File,
