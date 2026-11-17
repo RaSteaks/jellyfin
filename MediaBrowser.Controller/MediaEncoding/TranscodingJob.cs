@@ -98,6 +98,27 @@ public sealed class TranscodingJob : IDisposable
     /// </summary>
     public bool IsUserPaused { get; set; }
 
+    /// <summary>Gets or sets whether this job belongs to a disc adaptive HLS group.</summary>
+    public bool IsDiscAdaptive { get; set; }
+
+    /// <summary>Gets or sets whether an adaptive job produces video rather than shared audio.</summary>
+    public bool IsVideoOutput { get; set; }
+
+    /// <summary>Gets or sets the title position at which this job began.</summary>
+    public long StartPositionTicks { get; set; }
+
+    /// <summary>Gets or sets the end of a finite adaptive window, when runtime pausing is unavailable.</summary>
+    public long? OutputEndPositionTicks { get; set; }
+
+    /// <summary>Gets or sets the fixed adaptive segment interval, which survives encoding-window boundaries.</summary>
+    public long? SegmentLengthTicks { get; set; }
+
+    /// <summary>Gets or sets whether a superseded window may have an incomplete last segment.</summary>
+    public bool IsWindowTruncated { get; set; }
+
+    /// <summary>Gets or sets the last segment request time, independent of session progress pings.</summary>
+    public DateTime LastSegmentRequestUtc { get; set; }
+
     /// <summary>
     /// Gets or sets id.
     /// </summary>
@@ -248,7 +269,7 @@ public sealed class TranscodingJob : IDisposable
     /// <param name="intervalMs">Callback interval.</param>
     public void StartKillTimer(Action<object?> callback, int intervalMs)
     {
-        if (HasExited)
+        if (HasExited && !IsDiscAdaptive)
         {
             return;
         }
@@ -326,17 +347,22 @@ public sealed class TranscodingJob : IDisposable
         }
     }
 
-    /// <inheritdoc />
-    public void Dispose()
+    /// <summary>Releases encoder resources while keeping adaptive output cleanup alive.</summary>
+    public void DisposeProcess()
     {
         Process?.Dispose();
         Process = null;
-        _killTimer?.Dispose();
-        _killTimer = null;
         CancellationTokenSource?.Dispose();
         CancellationTokenSource = null;
         TranscodingThrottler?.Dispose();
         TranscodingThrottler = null;
+    }
+
+    /// <inheritdoc />
+    public void Dispose()
+    {
+        DisposeProcess();
+        DisposeKillTimer();
         TranscodingSegmentCleaner?.Dispose();
         TranscodingSegmentCleaner = null;
     }

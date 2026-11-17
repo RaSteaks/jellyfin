@@ -485,6 +485,13 @@ public class VideosController : BaseJellyfinApiController
         }
 
         // Static stream
+        if (@static == true && state.MediaSource.DiscTitle.HasValue)
+        {
+            // A title identifies a navigation timeline, not the bytes of its ISO.
+            // Original-file downloads keep their separate existing endpoint.
+            return BadRequest("A disc title requires its negotiated playback stream.");
+        }
+
         if (@static.HasValue && @static.Value && !(state.MediaSource.VideoType == VideoType.BluRay || state.MediaSource.VideoType == VideoType.Dvd))
         {
             var contentType = state.GetMimeType("." + state.OutputContainer, false) ?? state.GetMimeType(state.MediaPath);

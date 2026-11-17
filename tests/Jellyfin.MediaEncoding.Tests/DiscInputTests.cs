@@ -17,6 +17,26 @@ namespace Jellyfin.MediaEncoding.Tests;
 public class DiscInputTests
 {
     [Fact]
+    public void AdaptiveDiscBudgets_IncludeLowQualitiesWithoutExceedingTheNegotiatedTotal()
+    {
+        var video = DiscAdaptiveStreaming.GetVideoBitrates(5_872_000, 128_000);
+        Assert.Contains(292_000, video);
+        Assert.Contains(1_372_000, video);
+        Assert.Equal(5_872_000, video[^1]);
+        Assert.All(video, bitrate => Assert.InRange(bitrate + 128_000, 1, 6_000_000));
+        Assert.Equal(video.Count, new System.Collections.Generic.HashSet<int>(video).Count);
+    }
+
+    [Theory]
+    [InlineData(24, 3)]
+    [InlineData(23.976023674, 3.003)]
+    [InlineData(29.970029831, 3.003)]
+    public void AdaptiveDiscGrid_DoesNotAccumulateMillisecondRoundingDrift(double frameRate, double interval)
+    {
+        Assert.Equal(interval, DiscAdaptiveStreaming.GetSegmentDuration(frameRate, 3), 6);
+    }
+
+    [Fact]
     public void DiscStreamMapping_KeepsProbeIndexAfterLibraryFiltering()
     {
         var audio = new MediaStream { Index = 1, InputStreamIndex = 3, Type = MediaStreamType.Audio };

@@ -149,13 +149,14 @@ public class TranscodingThrottler : IDisposable
     {
         var bytesDownloaded = job.BytesDownloaded;
         var transcodingPositionTicks = job.TranscodingPositionTicks ?? 0;
-        var downloadPositionTicks = job.DownloadPositionTicks ?? 0;
+        var isDisc = job.MediaSource?.DiscTitle is not null;
+        var downloadPositionTicks = job.DownloadPositionTicks ?? (isDisc ? job.StartPositionTicks : 0);
 
         var path = job.Path ?? throw new ArgumentException("Path can't be null.");
 
         var gapLengthInTicks = TimeSpan.FromSeconds(thresholdSeconds).Ticks;
 
-        if (downloadPositionTicks > 0 && transcodingPositionTicks > 0)
+        if ((downloadPositionTicks > 0 || isDisc) && transcodingPositionTicks > 0)
         {
             // HLS - time-based consideration
 

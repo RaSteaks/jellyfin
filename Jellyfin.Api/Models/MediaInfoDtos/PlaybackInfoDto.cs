@@ -75,6 +75,18 @@ public class PlaybackInfoDto
     public bool? EnableTranscoding { get; set; }
 
     /// <summary>
+    /// Gets or sets whether to request adaptive HLS for a disc title.
+    /// Null uses the server setting; false keeps a fixed-quality stream.
+    /// </summary>
+    public bool? EnableAdaptiveBitrateStreaming { get; set; }
+
+    /// <summary>
+    /// Gets or sets the bitrate ceiling to use only when disc adaptive HLS is available.
+    /// MaxStreamingBitrate remains the budget for a single-quality fallback.
+    /// </summary>
+    public int? MaxAdaptiveStreamingBitrate { get; set; }
+
+    /// <summary>
     /// Gets or sets a value indicating whether to enable video stream copy.
     /// </summary>
     public bool? AllowVideoStreamCopy { get; set; }

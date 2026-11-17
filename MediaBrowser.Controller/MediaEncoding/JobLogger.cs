@@ -76,6 +76,12 @@ namespace MediaBrowser.Controller.MediaEncoding
             var startMs = state.BaseRequest.StartTimeTicks.HasValue
                 ? TimeSpan.FromTicks(state.BaseRequest.StartTimeTicks.Value).TotalMilliseconds
                 : 0;
+            if (state.TranscodingType == TranscodingJobType.Hls && state.MediaSource?.DiscTitle is not null)
+            {
+                // Navigated HLS uses copyts/start_at_zero: FFmpeg already reports
+                // the absolute title position, including an input seek.
+                startMs = 0;
+            }
 
             for (var i = 0; i < parts.Length; i++)
             {

@@ -132,6 +132,14 @@ public sealed class TranscodeManager : ITranscodeManager, IDisposable
 
         foreach (var job in jobs)
         {
+            if (job.IsDiscAdaptive && jobs.Any(other => other.IsDiscAdaptive
+                && other.IsVideoOutput == job.IsVideoOutput
+                && other.LastSegmentRequestUtc > job.LastSegmentRequestUtc))
+            {
+                // Session progress must not keep every previously selected variant alive.
+                continue;
+            }
+
             if (isUserPaused.HasValue)
             {
                 _logger.LogDebug("Setting job.IsUserPaused to {0}. jobId: {1}", isUserPaused, job.Id);
@@ -144,7 +152,7 @@ public sealed class TranscodeManager : ITranscodeManager, IDisposable
 
     private void PingTimer(TranscodingJob job, bool isProgressCheckIn)
     {
-        if (job.HasExited)
+        if (job.HasExited && !job.IsDiscAdaptive)
         {
             job.StopKillTimer();
             return;
@@ -155,6 +163,11 @@ public sealed class TranscodeManager : ITranscodeManager, IDisposable
         if (job.Type != TranscodingJobType.Progressive)
         {
             timerDuration = 60000;
+        }
+
+        if (job.IsDiscAdaptive)
+        {
+            timerDuration = 30000;
         }
 
         job.PingTimeout = timerDuration;
@@ -174,7 +187,15 @@ public sealed class TranscodeManager : ITranscodeManager, IDisposable
     private async void OnTranscodeKillTimerStopped(object? state)
     {
         var job = state as TranscodingJob ?? throw new ArgumentException($"{nameof(state)} is not of type {nameof(TranscodingJob)}", nameof(state));
-        if (!job.HasExited && job.Type != TranscodingJobType.Progressive)
+        using var outputLock = job.IsDiscAdaptive
+            ? await LockAsync(job.Path!, CancellationToken.None).ConfigureAwait(false)
+            : null;
+        if (job.IsDiscAdaptive && job.ActiveRequestCount > 0)
+        {
+            job.StartKillTimer(OnTranscodeKillTimerStopped, job.PingTimeout);
+            return;
+        }
+        if ((!job.HasExited || job.IsDiscAdaptive) && job.Type != TranscodingJobType.Progressive)
         {
             var timeSinceLastPing = (DateTime.UtcNow - job.LastPingDate).TotalMilliseconds;
 
@@ -244,6 +265,13 @@ public sealed class TranscodeManager : ITranscodeManager, IDisposable
         {
             await _sessionManager.CloseLiveStreamIfNeededAsync(job.LiveStreamId, job.PlaySessionId).ConfigureAwait(false);
         }
+    }
+
+    /// <inheritdoc />
+    public Task StopTranscodingOutput(string outputPath, TranscodingJobType type)
+    {
+        var job = GetTranscodingJob(outputPath, type);
+        return job is null ? Task.CompletedTask : KillTranscodingJob(job, false, _ => false);
     }
 
     private async Task DeletePartialStreamFiles(string path, TranscodingJobType jobType, int retryCount, int delayMs)
@@ -340,6 +368,13 @@ public sealed class TranscodeManager : ITranscodeManager, IDisposable
             job.BitRate = bitRate;
         }
 
+        if (state.Request.DiscAdaptive && !state.IsOutputVideo)
+        {
+            // Shared audio needs its own progress for throttling, but must not
+            // replace the session's video-transcoding information in the dashboard.
+            return;
+        }
+
         var deviceId = state.Request.DeviceId;
 
         if (!string.IsNullOrWhiteSpace(deviceId))
@@ -377,6 +412,14 @@ public sealed class TranscodeManager : ITranscodeManager, IDisposable
         CancellationTokenSource cancellationTokenSource,
         string? workingDirectory = null)
     {
+        using var adaptiveLock = state.Request.DiscAdaptive
+            ? await LockAsync("disc-adaptive:" + state.Request.PlaySessionId, cancellationTokenSource.Token).ConfigureAwait(false)
+            : null;
+        if (state.Request.DiscAdaptive)
+        {
+            await MakeRoomForDiscVariant(state, cancellationTokenSource.Token).ConfigureAwait(false);
+        }
+
         var directory = Path.GetDirectoryName(outputPath) ?? throw new ArgumentException($"Provided path ({outputPath}) is not valid.", nameof(outputPath));
         Directory.CreateDirectory(directory);
 
@@ -398,15 +441,7 @@ public sealed class TranscodeManager : ITranscodeManager, IDisposable
         // If subtitles get burned in fonts may need to be extracted from the media file
         if (state.SubtitleStream is not null && (state.SubtitleDeliveryMethod == SubtitleDeliveryMethod.Encode || state.BaseRequest.AlwaysBurnInSubtitleWhenTranscoding))
         {
-            if (state.MediaSource.VideoType == VideoType.Dvd || state.MediaSource.VideoType == VideoType.BluRay)
-            {
-                var concatPath = Path.Join(_appPaths.CachePath, "concat", state.MediaSource.Id + ".concat");
-                await _attachmentExtractor.ExtractAllAttachments(concatPath, state.MediaSource, cancellationTokenSource.Token).ConfigureAwait(false);
-            }
-            else
-            {
-                await _attachmentExtractor.ExtractAllAttachments(state.MediaPath, state.MediaSource, cancellationTokenSource.Token).ConfigureAwait(false);
-            }
+            await _attachmentExtractor.ExtractAllAttachments(state.MediaPath, state.MediaSource, cancellationTokenSource.Token).ConfigureAwait(false);
 
             if (state.SubtitleStream.IsExternal && Path.GetExtension(state.SubtitleStream.Path.AsSpan()).Equals(".mks", StringComparison.OrdinalIgnoreCase))
             {
@@ -528,11 +563,16 @@ public sealed class TranscodeManager : ITranscodeManager, IDisposable
         if (!transcodingJob.HasExited)
         {
             StartThrottler(state, transcodingJob);
-            StartSegmentCleaner(state, transcodingJob);
         }
         else if (transcodingJob.ExitCode != 0)
         {
             throw new FfmpegException(string.Format(CultureInfo.InvariantCulture, "FFmpeg exited with code {0}", transcodingJob.ExitCode));
+        }
+
+        if (!transcodingJob.HasExited || state.Request.DiscAdaptive)
+        {
+            // A finite window may finish before its segments are downloaded.
+            StartSegmentCleaner(state, transcodingJob);
         }
 
         _logger.LogDebug("StartFfMpeg() finished successfully");
@@ -556,7 +596,8 @@ public sealed class TranscodeManager : ITranscodeManager, IDisposable
            && state.RunTimeTicks.HasValue
            && state.RunTimeTicks.Value >= TimeSpan.FromMinutes(5).Ticks
            && state.IsInputVideo
-           && state.VideoType == VideoType.VideoFile;
+           && (state.VideoType == VideoType.VideoFile
+               || (state.TranscodingType == TranscodingJobType.Hls && state.MediaSource.DiscTitle.HasValue));
 
     private void StartSegmentCleaner(StreamState state, TranscodingJob transcodingJob)
     {
@@ -598,7 +639,15 @@ public sealed class TranscodeManager : ITranscodeManager, IDisposable
                 Id = transcodingJobId,
                 PlaySessionId = playSessionId,
                 LiveStreamId = liveStreamId,
-                MediaSource = state.MediaSource
+                MediaSource = state.MediaSource,
+                IsDiscAdaptive = state.Request.DiscAdaptive,
+                IsVideoOutput = state.IsOutputVideo,
+                StartPositionTicks = state.Request.StartTimeTicks ?? 0,
+                OutputEndPositionTicks = state.AdaptiveWindowEndTicks,
+                SegmentLengthTicks = state.Request.DiscAdaptive
+                    ? TimeSpan.FromSeconds(DiscAdaptiveStreaming.GetSegmentDuration(state.TargetFramerate ?? 0, state.SegmentLength)).Ticks
+                    : null,
+                LastSegmentRequestUtc = DateTime.UtcNow
             };
 
             _activeTranscodingJobs.Add(job);
@@ -657,7 +706,54 @@ public sealed class TranscodeManager : ITranscodeManager, IDisposable
             _logger.LogError("FFmpeg exited with code {0}", process.ExitCode);
         }
 
-        job.Dispose();
+        if (job.IsDiscAdaptive)
+        {
+            // Cached segments still belong to this job after a finite window exits.
+            // Keep retention cleanup and the quality-switch grace timer alive.
+            job.DisposeProcess();
+            lock (_activeTranscodingJobs)
+            {
+                // A stopped/replaced job no longer owns this output path.
+                if (_activeTranscodingJobs.Contains(job))
+                {
+                    PingTimer(job, false);
+                }
+            }
+        }
+        else
+        {
+            job.Dispose();
+        }
+    }
+
+    private async Task MakeRoomForDiscVariant(StreamState state, CancellationToken cancellationToken)
+    {
+        var limit = state.IsOutputVideo ? 2 : 1;
+        while (true)
+        {
+            TranscodingJob? victim;
+            lock (_activeTranscodingJobs)
+            {
+                var siblings = _activeTranscodingJobs.Where(j => j.IsDiscAdaptive && !j.HasExited
+                    && j.PlaySessionId == state.Request.PlaySessionId && j.IsVideoOutput == state.IsOutputVideo).ToArray();
+                if (siblings.Length < limit)
+                {
+                    return;
+                }
+
+                victim = siblings.Where(j => j.ActiveRequestCount == 0).MinBy(j => j.LastSegmentRequestUtc);
+            }
+
+            if (victim is not null)
+            {
+                // Stop producing, but retain its files until the normal idle cleanup.
+                // Requests still reading a sibling complete before its slot is reused.
+                victim.IsWindowTruncated = true;
+                victim.Stop();
+            }
+
+            await Task.Delay(50, cancellationToken).ConfigureAwait(false);
+        }
     }
 
     private async Task AcquireResources(StreamState state, CancellationTokenSource cancellationTokenSource)
@@ -698,6 +794,11 @@ public sealed class TranscodeManager : ITranscodeManager, IDisposable
             }
 
             job.IncrementActiveRequestCount();
+            job.LastSegmentRequestUtc = DateTime.UtcNow;
+            if (job.IsDiscAdaptive)
+            {
+                job.StopKillTimer();
+            }
             if (string.IsNullOrWhiteSpace(job.PlaySessionId) || job.Type == TranscodingJobType.Progressive)
             {
                 job.StopKillTimer();

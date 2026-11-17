@@ -45,6 +45,9 @@ public class CreateMainPlaylistRequest
     /// </summary>
     public int DesiredSegmentLengthMs { get; }
 
+    /// <summary>Gets or sets an exact frame-aligned interval for adaptive disc variants.</summary>
+    public long? ExactSegmentLengthTicks { get; set; }
+
     /// <summary>
     /// Gets the total runtime in ticks.
     /// </summary>

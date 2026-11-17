@@ -10,6 +10,12 @@ namespace MediaBrowser.Controller.MediaEncoding;
 /// </summary>
 public interface ITranscodeManager
 {
+    /// <summary>Stops one output without deleting its completed fragments or stopping sibling variants.</summary>
+    /// <param name="outputPath">The selected playlist path.</param>
+    /// <param name="type">The transcoding job type.</param>
+    /// <returns>The stop operation.</returns>
+    public Task StopTranscodingOutput(string outputPath, TranscodingJobType type);
+
     /// <summary>
     /// Get transcoding job.
     /// </summary>

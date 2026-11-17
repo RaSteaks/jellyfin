@@ -130,7 +130,7 @@ public sealed class DynamicHlsSegmentTests : IAsyncLifetime
         await WriteSegment(10);
         File.SetLastWriteTimeUtc(SegmentPath(9), DateTime.UtcNow.AddSeconds(-2));
 
-        // Registration is private and otherwise starts FFmpeg; only controlled job seeding uses reflection.
+        // Registration is private and otherwise starts FFmpeg; seed the controlled job directly.
         var activeJobs = (List<TranscodingJob>)typeof(TranscodeManager)
             .GetField("_activeTranscodingJobs", BindingFlags.Instance | BindingFlags.NonPublic)!
             .GetValue(_manager)!;
@@ -261,6 +261,19 @@ public sealed class DynamicHlsSegmentTests : IAsyncLifetime
         Assert.Equal(1, _job.ActiveRequestCount);
         await request.Complete();
         Assert.Equal(0, _job.ActiveRequestCount);
+    }
+
+    [Theory]
+    [InlineData(false, null)]
+    [InlineData(true, 10)]
+    public void ExitedJob_OnlyTruncatedOutputRetainsItsTailIndex(bool truncated, int? expected)
+    {
+        _job.HasExited = true;
+        _job.IsWindowTruncated = truncated;
+        var controller = _fixture.Build<DynamicHlsController>().OmitAutoProperties().Create();
+        var method = typeof(DynamicHlsController).GetMethod("GetCurrentTranscodingIndex", BindingFlags.Instance | BindingFlags.NonPublic)!;
+
+        Assert.Equal(expected, method.Invoke(controller, [_job.Path!, ".mp4"]));
     }
 
     public async ValueTask DisposeAsync()

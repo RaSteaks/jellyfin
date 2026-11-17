@@ -6,7 +6,9 @@ using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using Jellyfin.Api.Extensions;
+using Jellyfin.Data;
 using Jellyfin.Data.Enums;
+using Jellyfin.Database.Implementations.Enums;
 using Jellyfin.Extensions;
 using MediaBrowser.Common.Configuration;
 using MediaBrowser.Common.Extensions;
@@ -17,6 +19,7 @@ using MediaBrowser.Controller.MediaEncoding;
 using MediaBrowser.Controller.Streaming;
 using MediaBrowser.Model.Dlna;
 using MediaBrowser.Model.Dto;
+using MediaBrowser.Model.MediaInfo;
 using Microsoft.AspNetCore.Http;
 using Microsoft.Net.Http.Headers;
 
@@ -41,6 +44,7 @@ public static class StreamingHelpers
     /// <param name="transcodeManager">Instance of the <see cref="ITranscodeManager"/> interface.</param>
     /// <param name="transcodingJobType">The <see cref="TranscodingJobType"/>.</param>
     /// <param name="cancellationToken">The <see cref="CancellationToken"/>.</param>
+    /// <param name="resolvedSource">An already authorized and probed source when building sibling variants.</param>
     /// <returns>A <see cref="Task"/> containing the current <see cref="StreamState"/>.</returns>
     public static async Task<StreamState> GetStreamingState(
         StreamingRequestDto streamingRequest,
@@ -53,7 +57,8 @@ public static class StreamingHelpers
         EncodingHelper encodingHelper,
         ITranscodeManager transcodeManager,
         TranscodingJobType transcodingJobType,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        MediaSourceInfo? resolvedSource = null)
     {
         var httpRequest = httpContext.Request;
         if (!string.IsNullOrWhiteSpace(streamingRequest.Params))
@@ -112,16 +117,48 @@ public static class StreamingHelpers
 
         state.IsInputVideo = item.MediaType == MediaType.Video;
 
+        if (streamingRequest.Static && resolvedSource is null && string.IsNullOrEmpty(streamingRequest.LiveStreamId)
+            && (item is Video { VideoType: MediaBrowser.Model.Entities.VideoType.Iso }
+                || string.Equals(streamingRequest.Container, "iso", StringComparison.OrdinalIgnoreCase)
+                || string.Equals(streamingRequest.Container, "img", StringComparison.OrdinalIgnoreCase)))
+        {
+            var authorizedItem = libraryManager.GetItemById<BaseItem>(item.Id, state.User);
+            if (authorizedItem is not null)
+            {
+                var physical = mediaSourceManager.GetStaticMediaSources(authorizedItem, false, state.User)
+                    .FirstOrDefault(source => source.Id == (streamingRequest.MediaSourceId ?? item.Id.ToString("N", CultureInfo.InvariantCulture)));
+                if (physical?.VideoType == MediaBrowser.Model.Entities.VideoType.Iso && physical.Protocol == MediaProtocol.File)
+                {
+                    var extension = Path.GetExtension(physical.Path).TrimStart('.');
+                    if (string.IsNullOrEmpty(streamingRequest.Container) || string.Equals(streamingRequest.Container, extension, StringComparison.OrdinalIgnoreCase))
+                    {
+                        // An explicit original-file request is not a title selection.
+                        // Preserve byte ranges and the image MIME type for native readers.
+                        resolvedSource = physical;
+                        streamingRequest.Container = extension;
+                    }
+                }
+            }
+        }
+
         MediaSourceInfo? mediaSource = null;
-        if (string.IsNullOrWhiteSpace(streamingRequest.LiveStreamId))
+        if (resolvedSource is not null)
+        {
+            mediaSource = resolvedSource;
+        }
+        else if (string.IsNullOrWhiteSpace(streamingRequest.LiveStreamId))
         {
             var currentJob = !string.IsNullOrWhiteSpace(streamingRequest.PlaySessionId)
                 ? transcodeManager.GetTranscodingJob(streamingRequest.PlaySessionId)
                 : null;
 
-            if (currentJob is not null)
+            if (currentJob?.MediaSource is { } activeSource
+                && (string.IsNullOrEmpty(streamingRequest.MediaSourceId)
+                    ? activeSource.Id == item.Id.ToString("N", CultureInfo.InvariantCulture)
+                        || activeSource.DiscItemId == item.Id || activeSource.DiscVersionId == item.Id
+                    : string.Equals(activeSource.Id, streamingRequest.MediaSourceId, StringComparison.OrdinalIgnoreCase)))
             {
-                mediaSource = currentJob.MediaSource;
+                mediaSource = activeSource;
             }
 
             if (mediaSource is null)
@@ -135,11 +172,6 @@ public static class StreamingHelpers
                 if (mediaSource is null && Guid.TryParse(streamingRequest.MediaSourceId, out var legacySourceId) && legacySourceId.Equals(streamingRequest.Id))
                 {
                     mediaSource = SelectDefaultSource(mediaSources);
-                }
-
-                if (mediaSource is null && streamingRequest.MediaSourceId?.StartsWith("disc-", StringComparison.Ordinal) == true)
-                {
-                    mediaSource = await mediaSourceManager.GetMediaSource(item, streamingRequest.MediaSourceId, null, false, cancellationToken).ConfigureAwait(false);
                 }
 
                 if (mediaSource is null)
@@ -176,6 +208,27 @@ public static class StreamingHelpers
         }
 
         var encodingOptions = serverConfigurationManager.GetEncodingOptions();
+
+        streamingRequest.DiscAdaptive |= bool.TryParse(httpRequest.Query["DiscAdaptive"], out var adaptive) && adaptive;
+        if (streamingRequest.DiscAdaptive)
+        {
+            if (string.IsNullOrEmpty(streamingRequest.PlaySessionId))
+            {
+                throw new ArgumentException("An adaptive component requires its master's play session.");
+            }
+
+            if (!encodingOptions.EnableDiscAdaptiveBitrateStreaming || mediaSource?.DiscTitle is null
+                || state.User is null
+                || !state.User.HasPermission(PermissionKind.EnableVideoPlaybackTranscoding)
+                || !state.User.HasPermission(PermissionKind.EnableAudioPlaybackTranscoding))
+            {
+                throw new ArgumentException("Adaptive disc streaming is unavailable for this source or user.");
+            }
+
+            // These typed requests share the master's selected title and audio parameters.
+            streamingRequest.AllowVideoStreamCopy = false;
+            streamingRequest.AllowAudioStreamCopy = false;
+        }
 
         encodingHelper.AttachMediaSourceInfo(state, encodingOptions, mediaSource, url);
 
@@ -264,6 +317,21 @@ public static class StreamingHelpers
             {
                 state.OutputAudioCodec = state.SupportedAudioCodecs.Where(c => !EncodingHelper.LosslessAudioCodecs.Contains(c)).FirstOrDefault(mediaEncoder.CanEncodeToAudioCodec);
             }
+        }
+
+        if (streamingRequest.DiscAdaptive && state.IsOutputVideo)
+        {
+            // Audio is a shared rendition, not independently re-encoded in every video variant.
+            state.AudioStream = null;
+            state.OutputAudioCodec = null;
+            state.OutputAudioBitrate = null;
+        }
+        else if (streamingRequest.DiscAdaptive)
+        {
+            state.VideoStream = null;
+            state.OutputVideoCodec = null;
+            state.OutputVideoBitrate = null;
+            state.SubtitleStream = null;
         }
 
         var ext = string.IsNullOrWhiteSpace(state.OutputContainer)
@@ -392,6 +460,13 @@ public static class StreamingHelpers
     private static string GetOutputFilePath(StreamState state, string outputFileExtension, IServerConfigurationManager serverConfigurationManager, string? deviceId, string? playSessionId)
     {
         var data = $"{state.MediaPath}-{state.UserAgent}-{deviceId!}-{playSessionId!}";
+        if (state.Request.DiscAdaptive)
+        {
+            // A PlaySessionId is shared by all HLS variants. Their temporary output
+            // must not collide, including video and the shared audio rendition.
+            data += $"-{state.MediaSource.Id}-{state.IsOutputVideo}-{state.OutputVideoCodec}-{state.OutputVideoBitrate}-{state.OutputWidth}-{state.OutputHeight}-{state.OutputAudioCodec}-{state.OutputAudioBitrate}-{state.Request.AudioStreamIndex}-{state.Request.SubtitleStreamIndex}-{state.Request.SubtitleMethod}";
+            data += $"-{state.TargetFramerate}-{state.OutputAudioChannels}-{state.OutputAudioSampleRate}-{state.Request.SegmentContainer}-{state.SegmentLength}";
+        }
 
         var filename = data.GetMD5().ToString("N", CultureInfo.InvariantCulture);
         var ext = outputFileExtension.ToLowerInvariant();

@@ -145,3 +145,76 @@ See the packaging repository's `docker/custom/README.md` and `VERIFICATION.md` f
 build inputs, isolated Compose, executed results and limitations. Preserve production
 configuration/database backups before applying the schema change. No production data
 was used in development.
+
+## Adaptive disc HLS and client buffering
+
+The optional `EnableDiscAdaptiveBitrateStreaming` encoding setting exposes multiple
+H.264/AAC qualities for a selected disc title. It defaults to false. Updated Web
+passes the optional PlaybackInfo `EnableAdaptiveBitrateStreaming` preference;
+explicit false retains a fixed-quality stream. Clients which do not send the field
+inherit the server setting, subject to their HLS profile and existing video/audio
+transcoding permissions. The HLS endpoint's existing parameter name is retained.
+
+Web keeps its measured budget in `MaxStreamingBitrate` and sends a separate
+`MaxAdaptiveStreamingBitrate` ceiling. The server uses that ceiling only when
+adaptive playback is available, so a disabled or unsupported ABR path retains
+the measured single-quality budget. Server and user limits apply to both budgets.
+
+A title keeps the same MediaSourceId and play session while its HLS video variant
+changes. Single-item details asynchronously publish the title catalogue in ordinary
+MediaSources, without probing every movie in poster listings. A client can choose
+that opaque ID using its existing source selector, then request PlaybackInfo.
+Unselected ambiguous titles still fail explicitly; no longest/first-title fallback
+is added. Original-image static requests retain their byte stream and MIME type;
+a selected title cannot be served as if its ISO bytes were MP4 video.
+
+The adaptive master contains video-only renditions and one shared selected-audio
+rendition. Qualities are bounded by negotiated limits and the source's H.264-equivalent
+bitrate. Each entry declares its own codec/resolution, average budget and conservative
+VBV-based peak, including audio and mux overhead. All variants share a closed GOP and
+title-relative frame grid; fractional frame rates do not accumulate rounded-millisecond
+playlist drift. Switching tracks or burned subtitles negotiates a new group.
+
+At most two video encoders and one shared audio encoder run per play session. Only
+requested outputs are generated. Replacing/seeking one output stops that output,
+not its siblings. A departed variant's fragments have a 30-second grace period;
+active readers finish before cleanup. Enable the existing transcoding throttle and
+segment-deletion settings to control look-ahead and retained temporary data. The
+validation preset is 120 seconds ahead and a 300-second retained window.
+
+Stopped variants retain their partial-tail index for regeneration on the next
+request. Segment retention uses the common title-relative grid across encoding
+windows, and cleanup continues while a completed window is still being consumed.
+
+When FFmpeg supports the runtime pause command, existing throttling is used. The
+selected FFmpeg 8 build does not expose that command, so adaptive HLS instead produces
+finite, frame-aligned windows when throttling is enabled. The next requested window
+is generated from its own timeline position. This avoids privileged process signals
+or a permanent media conversion. Fixed-quality streams retain the encoder's existing
+throttle capabilities. Time-based buffering is not a strict disk quota.
+
+Web's hls.js path uses the package's standalone worker and a per-instance buffer
+controller. Encoded-media budgets start at 96 MiB on desktop and 48 MiB on mobile;
+forward buffering is at most 60 seconds, backward buffering at most 15 seconds,
+and the existing 6-second high-bitrate browser cap is retained. Startup/recovery
+thresholds shrink with the available buffer, so a 6-second cap never waits for a
+12-second threshold. Buffer waits keep fetching, can be cancelled or bypassed by
+Play, and never undo a manual pause. Only the contiguous range at the playhead is
+counted; buffered data beyond a seek hole is not playable buffer.
+
+Automatic quality uses raw throughput with a single 70% safety factor. It can fall
+quickly, requires two minutes of continuous playback/headroom before rising, then
+rises at most one level per 30 seconds. A failed rise imposes a four-minute cooldown.
+Pauses and seeks are not counted as stable playback. The estimator does not permanently
+cap the master at the initial network speed. Ordinary files, native HLS buffer sizing,
+cast playback and SyncPlay keep their existing client behavior.
+
+VideoToolbox retains the single-quality path because the existing encoder intentionally
+does not enforce VBV/maxrate bounds. HDR adaptation requires the configured tone-mapping
+path; HDR/hardware correctness still needs target-environment validation. Adaptive
+video output is transcoding and is never reported as Direct Play.
+
+Third-party clients consume standard HLS variants but own their buffering and ABR
+policy. Web's exact buffer sizes and rise timing cannot be imposed on VidHub. The
+macOS VidHub acceptance procedure is in the packaging repository's
+`docker/custom/VIDHUB_TESTING.md`; application verification is performed by the user.

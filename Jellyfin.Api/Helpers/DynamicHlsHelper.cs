@@ -5,6 +5,7 @@ using System.Linq;
 using System.Net;
 using System.Security.Claims;
 using System.Text;
+using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
 using Jellyfin.Api.Controllers;
@@ -26,6 +27,7 @@ using MediaBrowser.Model.Net;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Primitives;
 using Microsoft.Net.Http.Headers;
 
 namespace Jellyfin.Api.Helpers;
@@ -209,6 +211,15 @@ public class DynamicHlsHelper
             AddSubtitles(state, subtitleStreams, builder, _httpContextAccessor.HttpContext.User);
         }
 
+        if (enableAdaptiveBitrateStreaming
+            && _serverConfigurationManager.GetEncodingOptions().EnableDiscAdaptiveBitrateStreaming
+            && state.MediaSource.DiscTitle.HasValue && !isLiveStream
+            && state.OutputVideoBitrate > 0
+            && state.OutputVideoCodec == "h264" && state.OutputAudioCodec == "aac")
+        {
+            return await GetDiscAdaptivePlaylist(state, playlistQuery, builder, subtitleGroup, cancellationTokenSource.Token).ConfigureAwait(false);
+        }
+
         // For DoVi profiles without a compatible base layer (P5 HEVC, P10/bl0 AV1),
         // add a spec-compliant dvh1/dav1 variant before the hvc1 hack variant.
         // SUPPLEMENTAL-CODECS cannot be used for these profiles (no compatible BL to supplement).
@@ -342,11 +353,15 @@ public class DynamicHlsHelper
         return new FileContentResult(Encoding.UTF8.GetBytes(builder.ToString()), MimeTypes.GetMimeType("playlist.m3u8"));
     }
 
-    private StringBuilder AppendPlaylist(StringBuilder builder, StreamState state, string url, int bitrate, string? subtitleGroup)
+    private StringBuilder AppendPlaylist(StringBuilder builder, StreamState state, string url, int bitrate, string? subtitleGroup, string? audioGroup = null)
     {
         var playlistBuilder = new StringBuilder();
         playlistBuilder.Append("#EXT-X-STREAM-INF:BANDWIDTH=")
-            .Append(bitrate.ToString(CultureInfo.InvariantCulture))
+            .Append((state.Request.DiscAdaptive
+                ? DiscAdaptiveStreaming.GetPeakBitrate(state.OutputVideoBitrate.GetValueOrDefault(), state.OutputAudioBitrate.GetValueOrDefault(),
+                    DiscAdaptiveStreaming.GetSegmentDuration(state.TargetFramerate ?? 0, state.SegmentLength),
+                    _encodingHelper.GetVideoEncoder(state, _serverConfigurationManager.GetEncodingOptions()) == "h264_qsv" ? 4 : 2)
+                : bitrate).ToString(CultureInfo.InvariantCulture))
             .Append(",AVERAGE-BANDWIDTH=")
             .Append(bitrate.ToString(CultureInfo.InvariantCulture));
 
@@ -360,6 +375,11 @@ public class DynamicHlsHelper
 
         AppendPlaylistFramerateField(playlistBuilder, state);
 
+        if (audioGroup is not null)
+        {
+            playlistBuilder.Append(",AUDIO=\"").Append(audioGroup).Append('"');
+        }
+
         if (!string.IsNullOrWhiteSpace(subtitleGroup))
         {
             playlistBuilder.Append(",SUBTITLES=\"")
@@ -372,6 +392,87 @@ public class DynamicHlsHelper
         builder.Append(playlistBuilder);
 
         return playlistBuilder;
+    }
+
+    private async Task<ActionResult> GetDiscAdaptivePlaylist(
+        StreamState master,
+        Dictionary<string, StringValues> playlistQuery,
+        StringBuilder builder,
+        string? subtitleGroup,
+        CancellationToken cancellationToken)
+    {
+        var frameRate = master.TargetFramerate ?? master.VideoStream.ReferenceFrameRate;
+        var audioBitrate = master.AudioStream is null ? 0 : master.OutputAudioBitrate.GetValueOrDefault();
+        var audioGroup = master.AudioStream is null ? null : "disc-audio";
+        var commonQuery = new Dictionary<string, StringValues>(playlistQuery, StringComparer.OrdinalIgnoreCase)
+        {
+            ["PlaySessionId"] = master.Request.PlaySessionId ?? Guid.NewGuid().ToString("N", CultureInfo.InvariantCulture),
+            ["DiscAdaptive"] = "true",
+            ["EnableAdaptiveBitrateStreaming"] = "false",
+            ["AllowVideoStreamCopy"] = "false",
+            ["AllowAudioStreamCopy"] = "false",
+            ["SegmentLength"] = "3",
+            ["EnableAudioVbrEncoding"] = "false",
+            ["AudioBitRate"] = audioBitrate.ToString(CultureInfo.InvariantCulture)
+        };
+        if (frameRate.HasValue)
+        {
+            commonQuery["Framerate"] = frameRate.Value.ToString(CultureInfo.InvariantCulture);
+            commonQuery["MaxFramerate"] = frameRate.Value.ToString(CultureInfo.InvariantCulture);
+        }
+
+        if (audioGroup is not null)
+        {
+            var audioQuery = new Dictionary<string, StringValues>(commonQuery, StringComparer.OrdinalIgnoreCase);
+            audioQuery.Remove("VideoCodec");
+            audioQuery.Remove("VideoBitrate");
+            audioQuery.Remove("SubtitleStreamIndex");
+            audioQuery.Remove("SubtitleMethod");
+            var audioUrl = Microsoft.AspNetCore.WebUtilities.QueryHelpers.AddQueryString(
+                $"../../Audio/{master.Request.Id:N}/main.m3u8", audioQuery);
+            var language = master.AudioStream!.Language ?? "und";
+            builder.Append("#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID=\"disc-audio\",NAME=\"Audio\",DEFAULT=YES,AUTOSELECT=YES,LANGUAGE=\"")
+                .Append(language).Append("\",CHANNELS=\"").Append(master.OutputAudioChannels ?? 2)
+                .Append("\",URI=\"").Append(audioUrl).AppendLine("\"");
+        }
+
+        builder.AppendLine("#EXT-X-INDEPENDENT-SEGMENTS");
+        var videoLimit = master.OutputVideoBitrate!.Value;
+        var sourceBitrate = master.VideoStream.BitRate
+            ?? Math.Max(0, master.MediaSource.Bitrate.GetValueOrDefault() - (master.AudioStream?.BitRate ?? 0));
+        if (sourceBitrate > 0)
+        {
+            videoLimit = Math.Min(videoLimit, EncodingHelper.ScaleBitrate(sourceBitrate, master.VideoStream.Codec, "h264"));
+        }
+
+        foreach (var bitrate in DiscAdaptiveStreaming.GetVideoBitrates(videoLimit, audioBitrate))
+        {
+            var request = JsonSerializer.Deserialize<VideoRequestDto>(JsonSerializer.SerializeToUtf8Bytes(master.Request))!;
+            request.DiscAdaptive = true;
+            request.VideoBitRate = bitrate;
+            request.Framerate = frameRate;
+            request.MaxFramerate = frameRate;
+            request.SegmentLength = 3;
+            using var variant = await StreamingHelpers.GetStreamingState(
+                request, _httpContextAccessor.HttpContext!, _mediaSourceManager, _userManager, _libraryManager,
+                _serverConfigurationManager, _mediaEncoder, _encodingHelper, _transcodeManager,
+                TranscodingJobType.Hls, cancellationToken, master.MediaSource).ConfigureAwait(false);
+            var query = new Dictionary<string, StringValues>(commonQuery, StringComparer.OrdinalIgnoreCase)
+            {
+                ["VideoBitrate"] = bitrate.ToString(CultureInfo.InvariantCulture)
+            };
+
+            // The video playlist carries no audio, but its master CODECS declaration
+            // must include the shared audio rendition selected by AUDIO="disc-audio".
+            variant.AudioStream = master.AudioStream;
+            variant.OutputAudioCodec = master.OutputAudioCodec;
+            variant.OutputAudioBitrate = master.OutputAudioBitrate;
+            variant.OutputAudioChannels = master.OutputAudioChannels;
+            var url = Microsoft.AspNetCore.WebUtilities.QueryHelpers.AddQueryString("main.m3u8", query);
+            AppendPlaylist(builder, variant, url, bitrate + audioBitrate, subtitleGroup, audioGroup);
+        }
+
+        return new FileContentResult(Encoding.UTF8.GetBytes(builder.ToString()), MimeTypes.GetMimeType("playlist.m3u8"));
     }
 
     /// <summary>
@@ -436,7 +537,7 @@ public class DynamicHlsHelper
     /// <summary>
     /// Appends a VIDEO-RANGE field containing the range of the output video stream.
     /// </summary>
-    /// <seealso cref="AppendPlaylist(StringBuilder, StreamState, string, int, string)"/>
+    /// <seealso cref="AppendPlaylist(StringBuilder, StreamState, string, int, string, string)"/>
     /// <param name="builder">StringBuilder to append the field to.</param>
     /// <param name="state">StreamState of the current stream.</param>
     private void AppendPlaylistVideoRangeField(StringBuilder builder, StreamState state)
@@ -479,7 +580,7 @@ public class DynamicHlsHelper
     /// Appends a CODECS field containing formatted strings of
     /// the active streams output video and audio codecs.
     /// </summary>
-    /// <seealso cref="AppendPlaylist(StringBuilder, StreamState, string, int, string)"/>
+    /// <seealso cref="AppendPlaylist(StringBuilder, StreamState, string, int, string, string)"/>
     /// <seealso cref="GetPlaylistVideoCodecs(StreamState, string, int)"/>
     /// <seealso cref="GetPlaylistAudioCodecs(StreamState)"/>
     /// <param name="builder">StringBuilder to append the field to.</param>
@@ -524,7 +625,7 @@ public class DynamicHlsHelper
     /// Appends a SUPPLEMENTAL-CODECS field containing formatted strings of
     /// the active streams output Dolby Vision Videos.
     /// </summary>
-    /// <seealso cref="AppendPlaylist(StringBuilder, StreamState, string, int, string)"/>
+    /// <seealso cref="AppendPlaylist(StringBuilder, StreamState, string, int, string, string)"/>
     /// <seealso cref="GetPlaylistVideoCodecs(StreamState, string, int)"/>
     /// <param name="builder">StringBuilder to append the field to.</param>
     /// <param name="state">StreamState of the current stream.</param>
@@ -596,7 +697,7 @@ public class DynamicHlsHelper
     /// <summary>
     /// Appends a RESOLUTION field containing the resolution of the output stream.
     /// </summary>
-    /// <seealso cref="AppendPlaylist(StringBuilder, StreamState, string, int, string)"/>
+    /// <seealso cref="AppendPlaylist(StringBuilder, StreamState, string, int, string, string)"/>
     /// <param name="builder">StringBuilder to append the field to.</param>
     /// <param name="state">StreamState of the current stream.</param>
     private void AppendPlaylistResolutionField(StringBuilder builder, StreamState state)
@@ -613,7 +714,7 @@ public class DynamicHlsHelper
     /// <summary>
     /// Appends a FRAME-RATE field containing the framerate of the output stream.
     /// </summary>
-    /// <seealso cref="AppendPlaylist(StringBuilder, StreamState, string, int, string)"/>
+    /// <seealso cref="AppendPlaylist(StringBuilder, StreamState, string, int, string, string)"/>
     /// <param name="builder">StringBuilder to append the field to.</param>
     /// <param name="state">StreamState of the current stream.</param>
     private void AppendPlaylistFramerateField(StringBuilder builder, StreamState state)

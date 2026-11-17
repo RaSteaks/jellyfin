@@ -224,7 +224,9 @@ public class MediaInfoController : BaseJellyfinApiController
                     allowVideoStreamCopy.Value,
                     allowAudioStreamCopy.Value,
                     playbackInfoDto?.AlwaysBurnInSubtitleWhenTranscoding ?? false,
-                    Request.HttpContext.GetNormalizedRemoteIP());
+                    Request.HttpContext.GetNormalizedRemoteIP(),
+                    playbackInfoDto?.EnableAdaptiveBitrateStreaming,
+                    playbackInfoDto?.MaxAdaptiveStreamingBitrate);
             }
 
             _mediaInfoHelper.SortMediaSources(info, maxStreamingBitrate, item.Id);

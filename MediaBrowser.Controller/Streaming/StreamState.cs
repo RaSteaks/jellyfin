@@ -141,6 +141,9 @@ public class StreamState : EncodingJobInfo, IDisposable
     /// </summary>
     public TranscodingJob? TranscodingJob { get; set; }
 
+    /// <summary>Gets or sets the title-relative end of a bounded adaptive encoding window.</summary>
+    public long? AdaptiveWindowEndTicks { get; set; }
+
     /// <inheritdoc />
     public void Dispose()
     {

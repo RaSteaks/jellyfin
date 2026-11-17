@@ -43,7 +43,9 @@ public class DynamicHlsPlaylistGenerator : IDynamicHlsPlaylistGenerator
         }
         else
         {
-            segments = ComputeEqualLengthSegments(request.DesiredSegmentLengthMs, request.TotalRuntimeTicks);
+            segments = ComputeEqualLengthSegmentsTicks(
+                request.ExactSegmentLengthTicks ?? TimeSpan.FromMilliseconds(request.DesiredSegmentLengthMs).Ticks,
+                request.TotalRuntimeTicks);
         }
 
         var segmentExtension = EncodingHelper.GetSegmentFileExtension(request.SegmentContainer);
@@ -186,15 +188,16 @@ public class DynamicHlsPlaylistGenerator : IDynamicHlsPlaylistGenerator
     }
 
     internal static double[] ComputeEqualLengthSegments(int desiredSegmentLengthMs, long totalRuntimeTicks)
+        => ComputeEqualLengthSegmentsTicks(TimeSpan.FromMilliseconds(desiredSegmentLengthMs).Ticks, totalRuntimeTicks);
+
+    private static double[] ComputeEqualLengthSegmentsTicks(long segmentLengthTicks, long totalRuntimeTicks)
     {
-        if (desiredSegmentLengthMs == 0 || totalRuntimeTicks == 0)
+        if (segmentLengthTicks == 0 || totalRuntimeTicks == 0)
         {
-            throw new InvalidOperationException($"Invalid segment length ({desiredSegmentLengthMs}) or runtime ticks ({totalRuntimeTicks})");
+            throw new InvalidOperationException($"Invalid segment length ({segmentLengthTicks}) or runtime ticks ({totalRuntimeTicks})");
         }
 
-        var desiredSegmentLength = TimeSpan.FromMilliseconds(desiredSegmentLengthMs);
-
-        var segmentLengthTicks = desiredSegmentLength.Ticks;
+        var desiredSegmentLength = TimeSpan.FromTicks(segmentLengthTicks);
         var wholeSegments = totalRuntimeTicks / segmentLengthTicks;
         var remainingTicks = totalRuntimeTicks % segmentLengthTicks;
 

@@ -13,6 +13,7 @@ using Jellyfin.Database.Implementations.Entities;
 using Jellyfin.Database.Implementations.Enums;
 using Jellyfin.Extensions;
 using MediaBrowser.Common.Extensions;
+using MediaBrowser.Common.Configuration;
 using MediaBrowser.Common.Net;
 using MediaBrowser.Controller;
 using MediaBrowser.Controller.Configuration;
@@ -24,6 +25,7 @@ using MediaBrowser.Controller.MediaEncoding;
 using MediaBrowser.Model.Dlna;
 using MediaBrowser.Model.Dto;
 using MediaBrowser.Model.Entities;
+using MediaBrowser.Model.Extensions;
 using MediaBrowser.Model.MediaInfo;
 using MediaBrowser.Model.Session;
 using Microsoft.AspNetCore.Http;
@@ -216,6 +218,8 @@ public class MediaInfoHelper
     /// <param name="allowAudioStreamCopy">Allow audio stream copy.</param>
     /// <param name="alwaysBurnInSubtitleWhenTranscoding">Always burn-in subtitle when transcoding.</param>
     /// <param name="ipAddress">Requesting IP address.</param>
+    /// <param name="enableAdaptiveBitrateStreaming">Optional disc adaptive-stream preference.</param>
+    /// <param name="maxAdaptiveStreamingBitrate">Optional bitrate ceiling used only for adaptive disc playback.</param>
     public void SetDeviceSpecificData(
         BaseItem item,
         MediaSourceInfo mediaSource,
@@ -235,7 +239,9 @@ public class MediaInfoHelper
         bool allowVideoStreamCopy,
         bool allowAudioStreamCopy,
         bool alwaysBurnInSubtitleWhenTranscoding,
-        IPAddress ipAddress)
+        IPAddress ipAddress,
+        bool? enableAdaptiveBitrateStreaming = null,
+        int? maxAdaptiveStreamingBitrate = null)
     {
         var streamBuilder = new StreamBuilder(_mediaEncoder, _logger);
 
@@ -294,6 +300,44 @@ public class MediaInfoHelper
         }
 
         options.MaxBitrate = GetMaxBitrate(maxBitrate, user, ipAddress);
+
+        var encodingOptions = _serverConfigurationManager.GetEncodingOptions();
+        var adaptiveProfiles = profile.TranscodingProfiles.Where(p => p.Type == DlnaProfileType.Video
+            && p.Protocol == MediaStreamProtocol.hls
+            && ContainerHelper.ContainsContainer(p.VideoCodec, "h264")
+            && ContainerHelper.ContainsContainer(p.AudioCodec, "aac")).ToArray();
+        var discAdaptive = mediaSource.DiscTitle.HasValue
+            && enableAdaptiveBitrateStreaming != false
+            && encodingOptions.EnableDiscAdaptiveBitrateStreaming
+            // VideoToolbox deliberately uses no VBV/maxrate bound in the existing
+            // encoder; retain its single-quality path instead of advertising a false peak.
+            && !(encodingOptions.EnableHardwareEncoding && encodingOptions.HardwareAccelerationType == HardwareAccelerationType.videotoolbox)
+            && enableTranscoding
+            && user.HasPermission(PermissionKind.EnableVideoPlaybackTranscoding)
+            && user.HasPermission(PermissionKind.EnableAudioPlaybackTranscoding)
+            && adaptiveProfiles.Length > 0
+            && (mediaSource.VideoStream?.VideoRange != VideoRange.HDR
+                || encodingOptions.EnableTonemapping || encodingOptions.EnableVppTonemapping);
+        if (discAdaptive)
+        {
+            // Keep the measured budget when adaptation is unavailable. Server and
+            // user limits also apply to the separate adaptive ceiling.
+            options.MaxBitrate = GetMaxBitrate(maxAdaptiveStreamingBitrate ?? maxBitrate, user, ipAddress);
+
+            // All variants must use one compatible codec/range family. Do not mix
+            // an original HDR/remux entry with independently encoded SDR variants.
+            profile = JsonSerializer.Deserialize<DeviceProfile>(JsonSerializer.SerializeToUtf8Bytes(profile))!;
+            profile.TranscodingProfiles = adaptiveProfiles.Select(p => new TranscodingProfile(p)
+            {
+                VideoCodec = "h264", AudioCodec = "aac", SegmentLength = 3,
+                EnableAudioVbrEncoding = false
+            }).ToArray();
+            options.Profile = profile;
+            options.EnableDirectPlay = false;
+            options.EnableDirectStream = false;
+            options.AllowVideoStreamCopy = false;
+            options.AllowAudioStreamCopy = false;
+        }
 
         if (!options.ForceDirectStream)
         {
@@ -379,6 +423,15 @@ public class MediaInfoHelper
             }
 
             // Do this after the above so that StartPositionTicks is set
+            if (mediaSource.DiscTitle.HasValue && !string.IsNullOrEmpty(mediaSource.TranscodingUrl))
+            {
+                mediaSource.TranscodingUrl += "&EnableAdaptiveBitrateStreaming=" + (discAdaptive ? "true" : "false");
+                if (discAdaptive)
+                {
+                    mediaSource.TranscodingUrl += "&allowVideoStreamCopy=false&allowAudioStreamCopy=false";
+                }
+            }
+
             // The token must not be null
             SetDeviceSpecificSubtitleInfo(streamInfo, mediaSource, claimsPrincipal.GetToken()!);
             mediaSource.DefaultAudioStreamIndex = streamInfo.AudioStreamIndex;

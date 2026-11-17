@@ -7,6 +7,9 @@ namespace MediaBrowser.Controller.Streaming;
 /// </summary>
 public class StreamingRequestDto : BaseEncodingJobOptions
 {
+    /// <summary>Gets or sets whether this is one component of a navigated disc's adaptive stream.</summary>
+    public bool DiscAdaptive { get; set; }
+
     /// <summary>
     /// Gets or sets the params.
     /// </summary>

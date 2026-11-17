@@ -43,6 +43,7 @@ public class UserLibraryController : BaseJellyfinApiController
     private readonly IUserViewManager _userViewManager;
     private readonly IFileSystem _fileSystem;
     private readonly IProviderManager _providerManager;
+    private readonly IMediaSourceManager _mediaSourceManager;
 
     /// <summary>
     /// Initializes a new instance of the <see cref="UserLibraryController"/> class.
@@ -54,6 +55,7 @@ public class UserLibraryController : BaseJellyfinApiController
     /// <param name="userViewManager">Instance of the <see cref="IUserViewManager"/> interface.</param>
     /// <param name="fileSystem">Instance of the <see cref="IFileSystem"/> interface.</param>
     /// <param name="providerManager">Instance of the <see cref="IProviderManager"/> interface.</param>
+    /// <param name="mediaSourceManager">The playback source manager.</param>
     public UserLibraryController(
         IUserManager userManager,
         IUserDataManager userDataRepository,
@@ -61,7 +63,8 @@ public class UserLibraryController : BaseJellyfinApiController
         IDtoService dtoService,
         IUserViewManager userViewManager,
         IFileSystem fileSystem,
-        IProviderManager providerManager)
+        IProviderManager providerManager,
+        IMediaSourceManager mediaSourceManager)
     {
         _userManager = userManager;
         _userDataRepository = userDataRepository;
@@ -70,6 +73,7 @@ public class UserLibraryController : BaseJellyfinApiController
         _userViewManager = userViewManager;
         _fileSystem = fileSystem;
         _providerManager = providerManager;
+        _mediaSourceManager = mediaSourceManager;
     }
 
     /// <summary>
@@ -104,7 +108,16 @@ public class UserLibraryController : BaseJellyfinApiController
 
         var dtoOptions = new DtoOptions();
 
-        return _dtoService.GetBaseItemDto(item, dtoOptions, user);
+        var dto = _dtoService.GetBaseItemDto(item, dtoOptions, user);
+        if (dto.MediaSources?.Any(source => source.DiscType.HasValue) == true)
+        {
+            // Expand only explicit details, not every poster in a library listing.
+            // Legacy clients can select these opaque IDs using their normal source menu.
+            dto.MediaSources = (await _mediaSourceManager.GetPlaybackMediaSources(
+                item, user, true, false, HttpContext.RequestAborted).ConfigureAwait(false)).ToArray();
+        }
+
+        return dto;
     }
 
     /// <summary>

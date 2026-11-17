@@ -111,6 +111,12 @@ public class EncodingOptions
     public bool EnableThrottling { get; set; }
 
     /// <summary>
+    /// Gets or sets whether navigated disc titles may offer on-demand adaptive HLS.
+    /// Disabled by default; ordinary video sources retain their existing profiles.
+    /// </summary>
+    public bool EnableDiscAdaptiveBitrateStreaming { get; set; }
+
+    /// <summary>
     /// Gets or sets the delay after which throttling happens.
     /// </summary>
     public int ThrottleDelaySeconds { get; set; }

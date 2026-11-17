@@ -85,7 +85,7 @@ public class TranscodingSegmentCleaner : IDisposable
 
     private async void TimerCallback(object? state)
     {
-        if (_job.HasExited)
+        if (_job.HasExited && !_job.IsDiscAdaptive)
         {
             DisposeTimer();
             return;
@@ -102,9 +102,14 @@ public class TranscodingSegmentCleaner : IDisposable
 
             if (downloadPositionSeconds > 0 && segmentKeepSeconds > 0 && downloadPositionSeconds > segmentKeepSeconds)
             {
-                var idxMaxToDelete = _job.GetHighestServedSegmentIndexEndingAtOrBefore(downloadPositionTicks - TimeSpan.FromSeconds(segmentKeepSeconds).Ticks);
+                var keepFromTicks = downloadPositionTicks - TimeSpan.FromSeconds(segmentKeepSeconds).Ticks;
+                // Adaptive files use one fixed title-relative grid across encoder
+                // windows; the current job's download records omit earlier windows.
+                var idxMaxToDelete = _job.SegmentLengthTicks is { } interval
+                    ? (int)(keepFromTicks / interval) - 1
+                    : _job.GetHighestServedSegmentIndexEndingAtOrBefore(keepFromTicks);
 
-                if (idxMaxToDelete > 0)
+                if (idxMaxToDelete >= 0)
                 {
                     await DeleteSegmentFiles(_job, 0, idxMaxToDelete.Value, 1500).ConfigureAwait(false);
                 }

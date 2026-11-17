@@ -1420,6 +1420,11 @@ public class DynamicHlsController : BaseJellyfinApiController
             "hls1/main/",
             Request.QueryString.ToString(),
             EncodingHelper.IsCopyCodec(state.OutputVideoCodec));
+        if (state.Request.DiscAdaptive)
+        {
+            request.ExactSegmentLengthTicks = TimeSpan.FromSeconds(
+                DiscAdaptiveStreaming.GetSegmentDuration(fps, state.SegmentLength)).Ticks;
+        }
         var playlist = _dynamicHlsPlaylistGenerator.CreateMainPlaylist(request);
 
         return new FileContentResult(Encoding.UTF8.GetBytes(playlist), MimeTypes.GetMimeType("playlist.m3u8"));
@@ -1456,6 +1461,7 @@ public class DynamicHlsController : BaseJellyfinApiController
 
         TranscodingJob? job = null;
         TranscodingJob? jobToWaitFor = null;
+        TranscodingJob? windowToFinish = null;
         CancellationTokenSource? cancellationTokenSource = null;
         try
         {
@@ -1463,22 +1469,55 @@ public class DynamicHlsController : BaseJellyfinApiController
             {
                 // Readers must be able to acquire the lock while a replacement waits for them to finish.
                 await WaitForActiveTranscodingRequests(jobToWaitFor, cancellationToken).ConfigureAwait(false);
+                if (windowToFinish is not null)
+                {
+                    while (!windowToFinish.HasExited)
+                    {
+                        await Task.Delay(50, cancellationToken).ConfigureAwait(false);
+                    }
+
+                    windowToFinish = null;
+                }
 
                 // Selection, reader registration and replacement remain atomic per playlist.
                 using (await _transcodeManager.LockAsync(playlistPath, cancellationToken).ConfigureAwait(false))
                 {
                     var startTranscoding = false;
-                    if (System.IO.File.Exists(segmentPath))
+                    var existingOutput = state.Request.DiscAdaptive
+                        ? _transcodeManager.GetTranscodingJob(playlistPath, TranscodingJobType)
+                        : null;
+                    var pastWindow = existingOutput?.OutputEndPositionTicks is { } end
+                        && streamingRequest.CurrentRuntimeTicks >= end;
+                    var currentTranscodingIndex = GetCurrentTranscodingIndex(playlistPath, segmentExtension);
+                    var incompleteTail = existingOutput?.IsWindowTruncated == true
+                        && segmentId >= currentTranscodingIndex;
+                    if (System.IO.File.Exists(segmentPath) && !pastWindow && !incompleteTail)
                     {
                         job = _transcodeManager.OnTranscodeBeginRequest(playlistPath, TranscodingJobType);
                         _logger.LogDebug("returning {0} [it exists]", segmentPath);
                         break;
                     }
 
-                    var currentTranscodingIndex = GetCurrentTranscodingIndex(playlistPath, segmentExtension);
                     var segmentGapRequiringTranscodingChange = 24 / state.SegmentLength;
 
-                    if (segmentId == -1)
+                    if (existingOutput is { HasExited: false, OutputEndPositionTicks: not null }
+                        && streamingRequest.CurrentRuntimeTicks >= existingOutput.OutputEndPositionTicks.Value)
+                    {
+                        // Let the previous window flush its final complete segment.
+                        // Waiting outside the playlist lock keeps its readers unblocked.
+                        windowToFinish = existingOutput;
+                        continue;
+                    }
+
+                    if (existingOutput is not null && (existingOutput.HasExited
+                        || (existingOutput.OutputEndPositionTicks.HasValue
+                            && streamingRequest.CurrentRuntimeTicks >= existingOutput.OutputEndPositionTicks.Value)))
+                    {
+                        // The synthetic VOD playlist covers the full title; the encoder
+                        // may intentionally have produced only the requested window.
+                        startTranscoding = true;
+                    }
+                    else if (segmentId == -1)
                     {
                         _logger.LogDebug("Starting transcoding because fmp4 init file is being requested");
                         startTranscoding = true;
@@ -1509,16 +1548,39 @@ public class DynamicHlsController : BaseJellyfinApiController
 
                         try
                         {
-                            await _transcodeManager.KillTranscodingJobs(streamingRequest.DeviceId, streamingRequest.PlaySessionId, p => false)
-                                .ConfigureAwait(false);
+                            if (state.Request.DiscAdaptive)
+                            {
+                                // A shared audio rendition and another quality can be
+                                // serving this session while this output starts or seeks.
+                                await _transcodeManager.StopTranscodingOutput(playlistPath, TranscodingJobType).ConfigureAwait(false);
+                            }
+                            else
+                            {
+                                await _transcodeManager.KillTranscodingJobs(streamingRequest.DeviceId, streamingRequest.PlaySessionId, p => false)
+                                    .ConfigureAwait(false);
+                            }
 
-                            if (currentTranscodingIndex.HasValue)
+                            if (state.Request.DiscAdaptive && existingOutput?.OutputEndPositionTicks is { } windowEnd
+                                && windowEnd < state.RunTimeTicks)
+                            {
+                                // AAC encoder delay can leave a tiny tail at the next
+                                // grid index. It is not that index's full HLS segment.
+                                var intervalTicks = TimeSpan.FromSeconds(DiscAdaptiveStreaming.GetSegmentDuration(
+                                    state.TargetFramerate ?? 0, state.SegmentLength)).Ticks;
+                                var tailIndex = (int)Math.Round((double)windowEnd / intervalTicks);
+                                System.IO.File.Delete(GetSegmentPath(state, playlistPath, tailIndex));
+                            }
+
+                            if (currentTranscodingIndex.HasValue && !(state.Request.DiscAdaptive
+                                && existingOutput is { HasExited: true, IsWindowTruncated: false }))
                             {
                                 await DeleteLastFile(playlistPath, segmentExtension, 0).ConfigureAwait(false);
                             }
 
-                            // Preserve the init request's identity until replacement is actually selected.
-                            if (segmentId == -1)
+                            var startNumber = segmentId == -1 ? 0 : segmentId;
+                            // Adaptive init responses become ready with the first segment;
+                            // do not turn their identity into a request for media segment zero.
+                            if (segmentId == -1 && !state.Request.DiscAdaptive)
                             {
                                 segmentId = 0;
                             }
@@ -1531,7 +1593,7 @@ public class DynamicHlsController : BaseJellyfinApiController
                             job = await _transcodeManager.StartFfMpeg(
                                 state,
                                 playlistPath,
-                                GetCommandLineArguments(playlistPath, state, false, segmentId),
+                                GetCommandLineArguments(playlistPath, state, false, startNumber),
                                 Request.HttpContext.User.GetUserId(),
                                 TranscodingJobType,
                                 cancellationTokenSource).ConfigureAwait(false);
@@ -1624,7 +1686,7 @@ public class DynamicHlsController : BaseJellyfinApiController
         var videoCodec = _encodingHelper.GetVideoEncoder(state, _encodingOptions);
         var threads = EncodingHelper.GetNumberOfThreads(state, _encodingOptions, videoCodec);
 
-        var mapArgs = state.IsOutputVideo ? _encodingHelper.GetMapArgs(state) : string.Empty;
+        var mapArgs = state.IsOutputVideo || state.Request.DiscAdaptive ? _encodingHelper.GetMapArgs(state) : string.Empty;
 
         var directory = Path.GetDirectoryName(outputPath) ?? throw new ArgumentException($"Provided path ({outputPath}) is not valid.", nameof(outputPath));
         var outputFileNameWithoutExtension = Path.GetFileNameWithoutExtension(outputPath);
@@ -1635,7 +1697,29 @@ public class DynamicHlsController : BaseJellyfinApiController
         var segmentFormat = string.Empty;
         var segmentContainer = outputExtension.TrimStart('.');
         var inputModifier = _encodingHelper.GetInputModifier(state, _encodingOptions, segmentContainer);
+        if (state.MediaSource.DiscTitle.HasValue)
+        {
+            // Disc transport timestamps may start hundreds of seconds before the
+            // title's public timeline. Keep seeks, subtitles and throttle progress
+            // on the same title-relative clock for every HLS component.
+            inputModifier += " -start_at_zero";
+        }
         var hlsArguments = $"-hls_playlist_type {(isEventPlaylist ? "event" : "vod")} -hls_list_size 0";
+        if (state.Request.DiscAdaptive && _encodingOptions.EnableThrottling && !_mediaEncoder.IsPkeyPauseSupported)
+        {
+            // FFmpeg 8 has no runtime pause key. Produce a finite, frame-aligned
+            // window instead; the next segment request resumes from its own grid
+            // position. With copyts/start_at_zero, output -t is an absolute title end.
+            var interval = DiscAdaptiveStreaming.GetSegmentDuration(state.TargetFramerate ?? 0, state.SegmentLength);
+            // An init URI has no seek position. Generate one complete segment for
+            // its header, then let the requested media segment choose the window.
+            var window = state.Request.ActualSegmentLengthTicks == 0
+                ? interval
+                : Math.Ceiling(Math.Max(60, _encodingOptions.ThrottleDelaySeconds) / interval) * interval;
+            state.AdaptiveWindowEndTicks = Math.Min(state.RunTimeTicks!.Value,
+                (state.Request.StartTimeTicks ?? 0) + TimeSpan.FromSeconds(window).Ticks);
+            hlsArguments += " -t " + TimeSpan.FromTicks(state.AdaptiveWindowEndTicks.Value).TotalSeconds.ToString("0.######", CultureInfo.InvariantCulture);
+        }
 
         if (string.Equals(segmentContainer, "ts", StringComparison.OrdinalIgnoreCase))
         {
@@ -1653,7 +1737,7 @@ public class DynamicHlsController : BaseJellyfinApiController
 
             var useLegacySegmentOption = _mediaEncoder.EncoderVersion < _minFFmpegHlsSegmentOptions;
 
-            if (state.VideoStream is not null && state.IsOutputVideo)
+            if ((state.VideoStream is not null && state.IsOutputVideo) || state.Request.DiscAdaptive)
             {
                 // fMP4 needs frag_discont to write the audio packet DTS/PTS including the initial delay into MOOF::TRAF::TFDT
                 // HLS does not use SIDX, and skipping it avoids FFmpeg rewriting open-GOP boundary packet PTS
@@ -1691,7 +1775,9 @@ public class DynamicHlsController : BaseJellyfinApiController
             GetVideoArguments(state, startNumber, isEventPlaylist, segmentContainer),
             GetAudioArguments(state),
             maxMuxingQueueSize,
-            state.SegmentLength.ToString(CultureInfo.InvariantCulture),
+            (state.Request.DiscAdaptive
+                ? DiscAdaptiveStreaming.GetSegmentDuration(state.TargetFramerate ?? 0, state.SegmentLength)
+                : state.SegmentLength).ToString(CultureInfo.InvariantCulture),
             segmentFormat,
             startNumber.ToString(CultureInfo.InvariantCulture),
             baseUrlParam,
@@ -1727,7 +1813,7 @@ public class DynamicHlsController : BaseJellyfinApiController
             strictArgs = " -strict -2";
         }
 
-        if (!state.IsOutputVideo)
+        if (!state.IsOutputVideo && !state.Request.DiscAdaptive)
         {
             var audioTranscodeParams = string.Empty;
 
@@ -2066,7 +2152,9 @@ public class DynamicHlsController : BaseJellyfinApiController
     {
         var job = _transcodeManager.GetTranscodingJob(playlist, TranscodingJobType);
 
-        if (job is null || job.HasExited)
+        // A stopped adaptive encoder can leave a partial tail which must still be
+        // identified and replaced before serving that segment from disk.
+        if (job is null || (job.HasExited && !job.IsWindowTruncated))
         {
             return null;
         }

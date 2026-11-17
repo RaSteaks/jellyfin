@@ -20,6 +20,7 @@ using Jellyfin.Extensions;
 using MediaBrowser.Common.Configuration;
 using MediaBrowser.Controller.Extensions;
 using MediaBrowser.Controller.IO;
+using MediaBrowser.Controller.Streaming;
 using MediaBrowser.Model.Configuration;
 using MediaBrowser.Model.Dlna;
 using MediaBrowser.Model.Dto;
@@ -2021,6 +2022,16 @@ namespace MediaBrowser.Controller.MediaEncoding
             bool isEventPlaylist,
             int? startNumber)
         {
+            if (state is StreamState { Request.DiscAdaptive: true })
+            {
+                var rate = state.TargetFramerate ?? state.VideoStream.ReferenceFrameRate ?? 24;
+                var frames = Math.Ceiling(rate * segmentLength);
+                var interval = DiscAdaptiveStreaming.GetSegmentDuration(rate, segmentLength);
+                return string.Format(CultureInfo.InvariantCulture,
+                    " -g:v:0 {0} -keyint_min:v:0 {0} -flags:v +cgop -sc_threshold:v:0 0 -force_key_frames:0 \"expr:gte(t,n_forced*{1})\"",
+                    frames, interval);
+            }
+
             var args = string.Empty;
             var gopArg = string.Empty;
 
